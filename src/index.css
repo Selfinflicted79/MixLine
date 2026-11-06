@@ -1,0 +1,138 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-meter);
+  --font-heading: var(--font-display);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.5);
+  --radius-md: calc(var(--radius) * 0.7);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.2);
+}
+
+:root {
+  --font-display: "Oswald", sans-serif;
+  --font-body: "Rajdhani", sans-serif;
+  --font-meter: "IBM Plex Mono", monospace;
+
+  /* Late-80s / early-90s mixer rack */
+  --console-face: #3a3d42;
+  --console-ink: #e8e2d4;
+  --console-muted: #9a9488;
+  --console-edge: #1c1e22;
+  --chip: #4a4e55;
+  --chip-hover: #5a5f68;
+  --fader-track: #1a1c1f;
+  --fader-fill: #3d9bcc;
+  --meter-well: #121417;
+  --meter-green: #5fd36a;
+  --meter-amber: #f0a83a;
+  --meter-red: #e24b3b;
+  --meter-peak: #f7f0e0;
+  --accent-lime: #6ec4e0;
+  --accent-amber: #e8a23a;
+  --accent-red: #d94b3c;
+  --accent-blue: #3d9bcc;
+  --wood: #6b4423;
+  --wood-dark: #4a2f18;
+  --screw: #8a8478;
+
+  --background: #2a2c30;
+  --foreground: #e8e2d4;
+  --card: #3a3d42;
+  --card-foreground: #e8e2d4;
+  --popover: #4a4e55;
+  --popover-foreground: #e8e2d4;
+  --primary: #e8e2d4;
+  --primary-foreground: #2a2c30;
+  --secondary: #4a4e55;
+  --secondary-foreground: #e8e2d4;
+  --muted: #4a4e55;
+  --muted-foreground: #9a9488;
+  --accent: #3d9bcc;
+  --accent-foreground: #121417;
+  --destructive: #e24b3b;
+  --border: #1c1e22;
+  --input: #1c1e22;
+  --ring: #3d9bcc;
+  --radius: 0.25rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    margin: 0;
+    font-family: var(--font-body);
+    background:
+      radial-gradient(ellipse at top, rgba(80, 70, 50, 0.35), transparent 50%),
+      linear-gradient(180deg, #3a342c 0%, #2a2c30 40%, #1f2125 100%);
+    background-attachment: fixed;
+  }
+}
+
+.rack-panel {
+  border: 2px solid var(--console-edge);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 28%),
+    linear-gradient(90deg, var(--wood-dark) 0 14px, transparent 14px),
+    linear-gradient(90deg, transparent calc(100% - 14px), var(--wood-dark) calc(100% - 14px)),
+    linear-gradient(180deg, #454950, #32353a 55%, #2c2f34);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.35),
+    0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.rack-screw {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 30% 30%, #cfc8ba, var(--screw) 55%, #4a463e);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.strip-face {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 40%),
+    linear-gradient(180deg, #4a4e56, #3a3e45);
+  border: 1px solid #1a1c20;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.btn-lit {
+  letter-spacing: 0.12em;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 2px;
+  border: 1px solid #111;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
