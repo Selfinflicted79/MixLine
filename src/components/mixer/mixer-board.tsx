@@ -211,27 +211,78 @@ export function MixerBoard() {
 
   return (
     <div className="relative min-h-full overflow-hidden">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(214,196,150,0.45),transparent_55%),radial-gradient(ellipse_at_bottom_right,rgba(140,160,90,0.22),transparent_45%)]" />
-      <div className="pointer-events-none absolute inset-0 opacity-[0.18] [background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22%3E%3Cfilter id=%22n%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.85%22 numOctaves=%222%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.55%22/%3E%3C/svg%3E')]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_18%_0%,rgba(77,232,255,0.18),transparent_42%),radial-gradient(ellipse_at_85%_8%,rgba(255,79,216,0.16),transparent_40%)]" />
+      <div className="pointer-events-none absolute inset-0 opacity-[0.12] [background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22%3E%3Cfilter id=%22n%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.85%22 numOctaves=%222%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.55%22/%3E%3C/svg%3E')]" />
 
       <main className="relative mx-auto flex w-full max-w-[1400px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div className="max-w-xl">
-            <p className="font-[family-name:var(--font-display)] text-5xl leading-none tracking-[0.04em] text-[color:var(--console-ink)] uppercase sm:text-6xl">
-              MixLine
-            </p>
-            <p className="mt-3 max-w-md text-sm leading-relaxed text-[color:var(--console-muted)] sm:text-base">
-              Old-school rack energy for stream cues and Discord send — per-strip mix/mon, EQ, hotkeys, and saved setups.
-            </p>
+        <header className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-4 sm:gap-5">
+            {started ? (
+              <div className="logo-screen logo-screen--on shrink-0" aria-label="Badly Played Hub display">
+                <div className="logo-screen__glass">
+                  <img
+                    src="/bph-logo.png"
+                    alt="Badly Played Hub"
+                    className="bph-logo"
+                    width={120}
+                    height={120}
+                  />
+                  <span className="logo-screen__standby">Standby</span>
+                </div>
+                <span className="logo-screen__led" aria-hidden />
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="logo-screen shrink-0"
+                aria-label="Power on Badly Played Hub display"
+                onClick={() => void bootAndRestore()}
+              >
+                <div className="logo-screen__glass">
+                  <img
+                    src="/bph-logo.png"
+                    alt=""
+                    className="bph-logo"
+                    width={120}
+                    height={120}
+                  />
+                  <span className="logo-screen__standby">Standby</span>
+                </div>
+                <span className="logo-screen__led" aria-hidden />
+              </button>
+            )}
+            <div className="min-w-0">
+              <p
+                className={cn(
+                  "brand-eyebrow text-[0.7rem] font-semibold tracking-[0.28em] uppercase",
+                  started && "brand-eyebrow--on",
+                )}
+              >
+                Badly Played Hub
+              </p>
+              <p
+                className={cn(
+                  "brand-wordmark mt-1 text-5xl leading-none sm:text-6xl",
+                  started && "brand-wordmark--on",
+                )}
+              >
+                MixLine
+              </p>
+              <p className="mt-3 max-w-md text-sm leading-relaxed text-[color:var(--console-muted)] sm:text-base">
+                {started
+                  ? "Neon rack for stream cues and Discord send — mix/mon, EQ, hotkeys, saved setups."
+                  : "Hit Power on board — or tap the dark screen — and the logo boots with the rack."}
+              </p>
+            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
             {isElectron ? (
-              <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--console-edge)] bg-[color:var(--chip)] px-3 py-2 text-xs font-semibold tracking-wide text-[color:var(--console-ink)] uppercase">
+              <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--neon-cyan)]/25 bg-[color:var(--chip)] px-3 py-2 text-xs font-semibold tracking-wide text-[color:var(--console-ink)] uppercase">
                 Desktop app
               </div>
             ) : null}
-            <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--console-edge)] bg-[color:var(--chip)] px-3 py-2 text-xs text-[color:var(--console-muted)]">
+            <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-[color:var(--chip)] px-3 py-2 text-xs text-[color:var(--console-muted)]">
               <Save className="size-3.5" />
               {saveState === "saving"
                 ? "Saving…"
@@ -245,15 +296,15 @@ export function MixerBoard() {
               <Button
                 type="button"
                 size="lg"
-                className="h-11 rounded-md bg-[color:var(--console-ink)] px-5 text-[color:var(--console-face)] hover:bg-[color:var(--console-ink)]/90"
+                className="h-11 rounded-md border border-[color:var(--neon-magenta)]/40 bg-[linear-gradient(105deg,var(--neon-cyan),var(--neon-magenta))] px-5 font-semibold text-[#07080d] shadow-[0_0_24px_rgba(255,79,216,0.25)] hover:opacity-95"
                 onClick={() => void bootAndRestore()}
               >
                 <Headphones className="size-4" />
                 Power on board
               </Button>
             ) : (
-              <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--console-edge)] bg-[color:var(--chip)] px-3 py-2 text-xs font-semibold tracking-wide text-[color:var(--console-ink)] uppercase">
-                <span className="size-2 animate-pulse rounded-full bg-[color:var(--meter-green)]" />
+              <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--meter-green)]/35 bg-[color:var(--chip)] px-3 py-2 text-xs font-semibold tracking-wide text-[color:var(--console-ink)] uppercase">
+                <span className="size-2 animate-pulse rounded-full bg-[color:var(--meter-green)] shadow-[0_0_8px_var(--meter-green)]" />
                 Board live
               </div>
             )}
@@ -314,7 +365,7 @@ export function MixerBoard() {
           </div>
           <div className="mb-4 flex flex-col gap-3 border-b border-black/40 pb-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <h2 className="font-[family-name:var(--font-display)] text-2xl tracking-[0.06em] text-[color:var(--console-ink)] uppercase">
+              <h2 className="font-[family-name:var(--font-rack)] text-xl tracking-[0.14em] text-[color:var(--console-ink)] uppercase sm:text-2xl">
                 Channel rack
               </h2>
               <p className="text-sm text-[color:var(--console-muted)]">
@@ -572,7 +623,7 @@ function DeviceDialog({
       >
         <div className="flex items-center justify-between border-b border-[color:var(--console-edge)] px-4 py-3">
           <div>
-            <h3 className="font-[family-name:var(--font-display)] text-xl text-[color:var(--console-ink)]">
+            <h3 className="font-[family-name:var(--font-rack)] text-lg tracking-[0.08em] text-[color:var(--console-ink)] uppercase">
               {title}
             </h3>
             <p className="text-sm text-[color:var(--console-muted)]">{subtitle}</p>
@@ -623,7 +674,7 @@ function SourceButton({
 function EmptyRack({ onAddMic }: { onAddMic: () => void }) {
   return (
     <div className="flex min-h-72 min-w-[16rem] flex-1 flex-col items-start justify-center gap-3 rounded-md border border-dashed border-[color:var(--console-edge)] bg-[color:var(--chip)]/60 px-5 py-6">
-      <p className="font-[family-name:var(--font-display)] text-xl text-[color:var(--console-ink)]">
+      <p className="font-[family-name:var(--font-rack)] text-lg tracking-[0.1em] text-[color:var(--console-ink)] uppercase">
         Empty rack
       </p>
       <p className="max-w-sm text-sm text-[color:var(--console-muted)]">
