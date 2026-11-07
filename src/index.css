@@ -105,6 +105,64 @@
   }
 }
 
+.rack-shell {
+  --rack-x: clamp(0.75rem, 1.4vw, 1.75rem);
+  --rack-y: clamp(0.55rem, 1.1vh, 1.1rem);
+  --rack-gap: clamp(0.4rem, 1vh, 0.85rem);
+  --rack-pad: clamp(0.55rem, 1.1vh, 0.95rem);
+  --rack-title: clamp(0.95rem, 1.7vh, 1.45rem);
+  --rack-copy: clamp(0.72rem, 1.25vh, 0.95rem);
+  --brand-eyebrow: clamp(0.62rem, 1.1vh, 0.78rem);
+  --brand-title: clamp(2rem, 4.2vh, 3.4rem);
+  --fader-h: clamp(5.25rem, 16vh, 11.5rem);
+  --strip-w: clamp(7.1rem, 9vw, 8.5rem);
+  --strip-gap: clamp(0.4rem, 0.7vw, 0.7rem);
+  --logo-screen-size: clamp(3.6rem, 7.5vh, 6.4rem);
+}
+
+.rack-shell .logo-screen {
+  --screen-size: var(--logo-screen-size);
+}
+
+.rack-shell--mini {
+  --rack-x: 0.7rem;
+  --rack-y: 0.55rem;
+  --rack-gap: 0.45rem;
+  --rack-pad: 0.55rem;
+  --rack-title: 1rem;
+  --rack-copy: 0.72rem;
+  --brand-eyebrow: 0.62rem;
+  --brand-title: 2.1rem;
+  --fader-h: 7.5rem;
+  --strip-w: 7.25rem;
+  --strip-gap: 0.4rem;
+  --logo-screen-size: 3.6rem;
+  overflow: hidden;
+}
+
+.rack-shell--mini .rack-help {
+  display: none;
+}
+
+.mini-host {
+  background: #07080d;
+}
+
+.mini-rack {
+  background: #07080d;
+}
+
+@media (max-height: 860px) {
+  .rack-shell:not(.rack-shell--mini) .rack-help {
+    display: none;
+  }
+  .rack-shell:not(.rack-shell--mini) {
+    --fader-h: clamp(4.8rem, 14vh, 9rem);
+    --brand-title: clamp(1.75rem, 3.6vh, 2.6rem);
+    --rack-gap: 0.4rem;
+  }
+}
+
 .rack-panel {
   border: 2px solid color-mix(in srgb, var(--neon-cyan) 22%, var(--console-edge));
   background:
@@ -120,7 +178,7 @@
 }
 
 .logo-screen {
-  --screen-size: clamp(5.75rem, 15vw, 8rem);
+  --screen-size: clamp(6.25rem, 9vw, 9.5rem);
   position: relative;
   display: grid;
   place-items: center;
@@ -137,6 +195,33 @@
     inset 0 -2px 0 rgba(0, 0, 0, 0.55),
     0 10px 24px rgba(0, 0, 0, 0.45);
   transition: box-shadow 0.5s ease, transform 0.35s ease;
+}
+
+.logo-screen--compact {
+  --screen-size: 3.35rem;
+  width: calc(var(--screen-size) + 0.7rem);
+  height: calc(var(--screen-size) + 0.7rem);
+  border-radius: 0.75rem;
+}
+
+.logo-screen--compact .logo-screen__glass {
+  border-radius: 0.55rem;
+}
+
+.logo-screen--compact .bph-logo {
+  border-radius: 0.55rem;
+}
+
+.logo-screen--compact .logo-screen__standby {
+  font-size: 0.45rem;
+  letter-spacing: 0.16em;
+}
+
+.logo-screen--compact .logo-screen__led {
+  right: 0.28rem;
+  bottom: 0.24rem;
+  width: 0.32rem;
+  height: 0.32rem;
 }
 
 .logo-screen:is(button) {

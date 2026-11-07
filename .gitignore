@@ -38,7 +38,9 @@ yarn-error.log*
 next-env.d.ts
 
 # local binaries / archive
+/native/bin/
 MixLine-*-portable.exe
 MixLine-source.zip
 *.exe
+*.obj
 

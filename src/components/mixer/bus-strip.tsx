@@ -16,6 +16,8 @@ type BusStripProps = {
   rms: number;
   eq: EqBand[];
   eqMode: boolean;
+  /** Main Mix uses the Live EQ panel instead of this button. */
+  showEq?: boolean;
   onVolume: (v: number) => void;
   onMute: () => void;
   onEnterEq: () => void;
@@ -34,6 +36,7 @@ export function BusStrip({
   rms,
   eq,
   eqMode,
+  showEq = true,
   onVolume,
   onMute,
   onEnterEq,
@@ -47,8 +50,8 @@ export function BusStrip({
   return (
     <section
       className={cn(
-        "strip-face flex shrink-0 flex-col gap-2 rounded-sm px-2.5 py-3",
-        eqMode ? "w-[22rem]" : "w-[9rem]",
+        "strip-face flex h-full shrink-0 flex-col gap-2 rounded-sm px-2.5 py-3",
+        showEq && eqMode ? "w-[22rem]" : "w-[9rem]",
       )}
       style={{ boxShadow: `inset 3px 0 0 ${edge}` }}
     >
@@ -68,7 +71,7 @@ export function BusStrip({
         </p>
       </button>
 
-      {eqMode ? (
+      {showEq && eqMode ? (
         <>
           <div className="flex justify-center gap-2 overflow-x-auto pb-1">
             {eq.map((band) => (
@@ -103,13 +106,13 @@ export function BusStrip({
         </>
       ) : (
         <>
-          <div className="flex justify-center gap-3">
-            <LevelMeter rms={rms} peak={peak} className="h-48 w-3.5" />
+          <div className="flex min-h-0 flex-1 justify-center gap-3">
+            <LevelMeter rms={rms} peak={peak} className="h-full min-h-0 w-3.5" />
             <VerticalFader
               value={volume}
               onChange={onVolume}
               label={`${title} volume`}
-              className="h-48"
+              className="h-full min-h-0"
               accent={accent}
             />
           </div>
@@ -118,7 +121,7 @@ export function BusStrip({
             {formatDb(rms)} dB
           </div>
 
-          <div className="grid grid-cols-2 gap-1">
+          <div className={cn("grid gap-1", showEq ? "grid-cols-2" : "grid-cols-1")}>
             <button
               type="button"
               className={cn(
@@ -131,13 +134,15 @@ export function BusStrip({
             >
               Mute
             </button>
-            <button
-              type="button"
-              className="btn-lit h-8 bg-[color:var(--chip)] text-[10px] text-[color:var(--console-ink)] hover:bg-[color:var(--chip-hover)]"
-              onClick={onEnterEq}
-            >
-              EQ
-            </button>
+            {showEq ? (
+              <button
+                type="button"
+                className="btn-lit h-8 bg-[color:var(--chip)] text-[10px] text-[color:var(--console-ink)] hover:bg-[color:var(--chip-hover)]"
+                onClick={onEnterEq}
+              >
+                EQ
+              </button>
+            ) : null}
           </div>
         </>
       )}

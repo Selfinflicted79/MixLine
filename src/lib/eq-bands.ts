@@ -40,16 +40,19 @@ export function eqResponsePath(
     const t = i / samples;
     // log frequency 20Hz..20kHz
     const freq = 20 * Math.pow(1000, t);
-    let magDb = 0;
-    for (const band of bands) {
-      magDb += approxBandDb(band, freq);
-    }
+    const magDb = eqDbAt(bands, freq);
     const x = t * width;
     const norm = (magDb - minDb) / (maxDb - minDb);
     const y = height - Math.min(1, Math.max(0, norm)) * height;
     points.push(`${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`);
   }
   return points.join(" ");
+}
+
+export function eqDbAt(bands: EqBand[], freq: number) {
+  let magDb = 0;
+  for (const band of bands) magDb += approxBandDb(band, freq);
+  return magDb;
 }
 
 function approxBandDb(band: EqBand, freq: number): number {

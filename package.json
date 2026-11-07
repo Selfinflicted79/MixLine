@@ -1,6 +1,6 @@
 {
   "name": "mixline",
-  "version": "0.2.0",
+  "version": "0.2.19",
   "private": true,
   "description": "A small desktop mixing board for mic, PC, and app audio",
   "author": "MixLine",
@@ -12,7 +12,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 4317",
     "electron": "electron .",
-    "dist:win": "npm run build && electron-builder --win portable --x64",
+    "build:capture": "scripts\\build-capture.bat",
+    "dist:win": "npm run build:capture && npm run build && electron-builder --win portable --x64",
     "dist:win:dir": "npm run build && electron-builder --win dir --x64",
     "lint": "eslint ."
   },
@@ -26,6 +27,12 @@
       "dist/**/*",
       "electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/bin/mixline-capture.exe",
+        "to": "mixline-capture.exe"
+      }
     ],
     "win": {
       "target": [
@@ -65,5 +72,10 @@
     "typescript": "^5",
     "vite": "^7.1.12",
     "wait-on": "^9.0.1"
+  },
+  "allowScripts": {
+    "electron@39.8.10": true,
+    "esbuild@0.28.2": true,
+    "electron-winstaller@5.4.0": true
   }
 }

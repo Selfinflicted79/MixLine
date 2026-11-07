@@ -79,12 +79,18 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
   }
   if (raw.masterEq) {
     for (const band of raw.masterEq) {
-      audioEngine.setBusEqGain("master", band.id, band.gainDb);
+      audioEngine.setBusEq("master", band.id, {
+        gainDb: band.gainDb,
+        frequency: band.frequency,
+      });
     }
   }
   if (raw.cueEq) {
     for (const band of raw.cueEq) {
-      audioEngine.setBusEqGain("cue", band.id, band.gainDb);
+      audioEngine.setBusEq("cue", band.id, {
+        gainDb: band.gainDb,
+        frequency: band.frequency,
+      });
     }
   }
   audioEngine.setMonitorMix(raw.monitorMix ?? raw.monitorEnabled ?? false);
@@ -105,6 +111,7 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
       if (typeof cue.toMix === "boolean") audioEngine.setCueToMix(id, cue.toMix);
       if (typeof cue.monitor === "boolean") audioEngine.setCueMonitor(id, cue.monitor);
       audioEngine.setCueHotkey(id, cue.hotkey);
+      audioEngine.setCuePad(id, typeof cue.pad === "number" ? cue.pad : null);
     };
     if (cue.builtin) {
       applyCueControls(cue.id);
@@ -118,6 +125,7 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
           name: cue.name,
           fileId: cue.fileId,
           hotkey: cue.hotkey,
+          pad: cue.pad,
           volume: cue.volume,
           muted: cue.muted,
           solo: cue.solo,
@@ -144,9 +152,52 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
           toMix: ch.toMix,
           monitor: ch.monitor,
           eq: ch.eq,
+          fx: ch.fx,
+          boostDb: ch.boostDb,
         });
       } catch {
         notes.push("Saved mic couldn’t reopen — pick it again from Mic.");
+      }
+      continue;
+    }
+
+    if (ch.kind === "app" && ch.captureMode === "process") {
+      try {
+        const apps = window.mixlineDesktop ? await window.mixlineDesktop.listAudioApps() : [];
+        const exe = (ch.deviceId || "").replace(/^proc:/, "").split(":")[0];
+        const match =
+          apps.find((app) => app.exe.toLowerCase() === exe.toLowerCase() && app.name === ch.name) ||
+          apps.find((app) => app.exe.toLowerCase() === exe.toLowerCase());
+        if (!match) throw new Error("app not open");
+        const id = await audioEngine.addAppProcess({
+          pid: match.pid,
+          name: ch.name,
+          exe: match.exe,
+        });
+        await audioEngine.applyChannelSettings(id, {
+          volume: ch.volume,
+          muted: ch.muted,
+          solo: ch.solo,
+          toMix: ch.toMix,
+          monitor: ch.monitor,
+          eq: ch.eq,
+          fx: ch.fx,
+          boostDb: ch.boostDb,
+        });
+      } catch {
+        audioEngine.addAppPlaceholder({
+          name: ch.name,
+          deviceId: ch.deviceId,
+          deviceLabel: ch.deviceLabel || ch.name,
+          volume: ch.volume,
+          muted: ch.muted,
+          solo: ch.solo,
+          toMix: ch.toMix,
+          eq: ch.eq,
+          captureMode: "process",
+          boostDb: ch.boostDb,
+        });
+        notes.push(`Open “${ch.name}” and add it again — MixLine taps that app only.`);
       }
       continue;
     }
@@ -163,6 +214,8 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
             toMix: ch.toMix,
             monitor: ch.monitor,
             eq: ch.eq,
+            fx: ch.fx,
+            boostDb: ch.boostDb,
           });
         } catch {
           audioEngine.addAppPlaceholder({
@@ -174,6 +227,7 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
             solo: ch.solo,
             toMix: ch.toMix,
             eq: ch.eq,
+            boostDb: ch.boostDb,
           });
           notes.push(`Reconnect “${ch.name}” — pick its audio device on the strip.`);
         }
@@ -187,6 +241,7 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
           solo: ch.solo,
           toMix: ch.toMix,
           eq: ch.eq,
+          boostDb: ch.boostDb,
         });
         notes.push(
           `“${ch.name}” is saved but its audio device isn’t connected. Route that app to a virtual cable, then pick the device on the strip.`,
@@ -202,6 +257,8 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
       );
     }
   }
+
+  audioEngine.orderCues(raw.cues.map((cue) => cue.id));
 
   await syncHotkeys(raw);
   return {

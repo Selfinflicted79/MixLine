@@ -3,6 +3,7 @@ import {
   AppWindow,
   Headphones,
   Mic,
+  Minimize2,
   Monitor,
   Plus,
   Radio,
@@ -15,20 +16,34 @@ import { AddAppDialog } from "@/components/mixer/add-app-dialog";
 import { ChannelStrip } from "@/components/mixer/channel-strip";
 import { DiscordRoute } from "@/components/mixer/discord-route";
 import { BusStrip } from "@/components/mixer/bus-strip";
+import { LiveEq } from "@/components/mixer/live-eq";
+import { MiniRack } from "@/components/mixer/mini-rack";
 import { Soundboard } from "@/components/mixer/soundboard";
 import {
   audioEngine,
   type MixerSnapshot,
 } from "@/lib/audio-engine";
 import { cloneDefaultEq } from "@/lib/eq-bands";
+import { MpdAssignPanel } from "@/components/mixer/mpd-assign";
+import {
+  faderControl,
+  knobControl,
+  loadMpdAssign,
+  saveMpdAssign,
+  startMpd226,
+  type MpdAssign,
+  type MpdControl,
+  type MpdStatus,
+} from "@/lib/mpd226";
 import {
   persistCueFile,
   restoreSetup,
   saveCurrentSetup,
   syncHotkeys,
 } from "@/lib/setup-store";
-import type { DesktopSource } from "@/vite-env";
+import type { AudioAppInfo } from "@/vite-env";
 import { cn } from "cn";
+import bphLogo from "@/assets/bph-logo.png";
 
 const emptySnap: MixerSnapshot = {
   channels: [],
@@ -58,14 +73,20 @@ export function MixerBoard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [appWindows, setAppWindows] = useState<DesktopSource[]>([]);
+  const [audioApps, setAudioApps] = useState<AudioAppInfo[]>([]);
+  const [appsError, setAppsError] = useState<string | null>(null);
   const [micPickerOpen, setMicPickerOpen] = useState(false);
   const [isElectron, setIsElectron] = useState(false);
   const [eqChannelId, setEqChannelId] = useState<string | null>(null);
+  const [fxChannelId, setFxChannelId] = useState<string | null>(null);
   const [eqBus, setEqBus] = useState<"master" | "cue" | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">(
     "idle",
   );
+  const [compact, setCompact] = useState(false);
+  const [mpd, setMpd] = useState<MpdStatus>({ connected: false, name: null });
+  const [mpdAssign, setMpdAssign] = useState<MpdAssign>(() => loadMpdAssign());
+  const [mpdMapOpen, setMpdMapOpen] = useState(false);
   const [, startTransition] = useTransition();
   const fileRef = useRef<HTMLInputElement>(null);
   const lastSavedJson = useRef("");
@@ -74,6 +95,23 @@ export function MixerBoard() {
   useEffect(() => {
     setIsElectron(!!window.mixlineDesktop);
   }, []);
+
+  useEffect(() => {
+    if (!window.mixlineDesktop) return;
+    void window.mixlineDesktop.getWindowMode().then((mode) => setCompact(mode === "compact"));
+    return window.mixlineDesktop.onWindowMode((mode) => setCompact(mode === "compact"));
+  }, []);
+
+  async function setWindowMode(mode: "full" | "compact") {
+    setCompact(mode === "compact");
+    if (!window.mixlineDesktop) return;
+    try {
+      const result = await window.mixlineDesktop.setWindowMode(mode);
+      setCompact(result.mode === "compact");
+    } catch {
+      /* browser preview — local UI mode only */
+    }
+  }
 
   useEffect(() => {
     const unsubscribe = audioEngine.subscribe(setSnap);
@@ -135,6 +173,55 @@ export function MixerBoard() {
     }
   }
 
+  function applyMpd(control: MpdControl, value: number) {
+    if (!bootedRef.current) void bootAndRestore();
+    if (control.kind === "volume") audioEngine.setVolume(control.id, value);
+    else if (control.kind === "trim") audioEngine.setBoost(control.id, value * 24);
+    else if (control.kind === "cue") audioEngine.setCueMasterVolume(value);
+    else if (control.kind === "mix") audioEngine.setMasterVolume(value);
+    else if (control.kind === "eq") {
+      audioEngine.setBusEq("master", control.bandId, { gainDb: value * 24 - 12 });
+    } else audioEngine.setMonitorVolume(value);
+  }
+
+  function muteMpd(control: MpdControl) {
+    if (control.kind === "volume") {
+      const channel = snap.channels.find((item) => item.id === control.id);
+      if (channel) audioEngine.setMuted(channel.id, !channel.muted);
+      return;
+    }
+    if (control.kind === "cue") audioEngine.setCueMasterMuted(!snap.cueMasterMuted);
+    if (control.kind === "mix") audioEngine.setMasterMuted(!snap.masterMuted);
+  }
+
+  const midiRef = useRef({
+    pad: (_index: number) => {},
+    fader: (_index: number, _value: number) => {},
+    knob: (_index: number, _value: number) => {},
+    sw: (_index: number) => {},
+  });
+  midiRef.current = {
+    pad: (index) => {
+      const cue = snap.cues.find((item) => item.pad === index);
+      if (!cue) return;
+      if (!bootedRef.current) void bootAndRestore();
+      void audioEngine.playCue(cue.id);
+    },
+    fader: (index, value) => applyMpd(faderControl(index, mpdAssign, snap.channels), value),
+    knob: (index, value) => applyMpd(knobControl(index, mpdAssign, snap.channels), value),
+    sw: (index) => muteMpd(faderControl(index, mpdAssign, snap.channels)),
+  };
+
+  useEffect(() => {
+    return startMpd226({
+      onStatus: setMpd,
+      onPad: (index) => midiRef.current.pad(index),
+      onFader: (index, value) => midiRef.current.fader(index, value),
+      onKnob: (index, value) => midiRef.current.knob(index, value),
+      onSwitch: (index) => midiRef.current.sw(index),
+    });
+  }, []);
+
   async function runAction(label: string, action: () => Promise<unknown>) {
     setError(null);
     setBusy(label);
@@ -150,28 +237,28 @@ export function MixerBoard() {
     }
   }
 
+  async function refreshAudioApps() {
+    if (!window.mixlineDesktop?.listAudioApps) {
+      setAppsError("Per-app capture only works in the MixLine desktop app.");
+      setAudioApps([]);
+      return;
+    }
+    await audioEngine.refreshDevices();
+    const list = await window.mixlineDesktop.listAudioApps();
+    setAudioApps(list);
+    setAppsError(null);
+  }
+
   async function openAppPicker() {
     setError(null);
     setBusy("app");
     try {
       await bootIfNeeded();
-      try {
-        const probe = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        probe.getTracks().forEach((t) => t.stop());
-      } catch {
-        /* may already have permission */
-      }
-      await audioEngine.refreshDevices();
-
-      if (window.mixlineDesktop) {
-        const list = await window.mixlineDesktop.getDesktopSources();
-        setAppWindows(list.filter((s) => s.id.startsWith("window:")));
-      } else {
-        setAppWindows([]);
-      }
+      await refreshAudioApps();
       setPickerOpen(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not list open apps.");
+      setAppsError(err instanceof Error ? err.message : "Could not list open apps.");
+      setPickerOpen(true);
     } finally {
       setBusy(null);
     }
@@ -201,6 +288,23 @@ export function MixerBoard() {
     });
   }
 
+  async function handleAddMusicFile(file: File) {
+    await runAction("music", async () => {
+      await audioEngine.addFile(file, file.name.replace(/\.[^.]+$/, "") || "Music");
+    });
+  }
+
+  function pickLocalMusic() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "audio/*";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (file) void handleAddMusicFile(file);
+    };
+    input.click();
+  }
+
   async function handleHotkey(id: string, hotkey: string | null) {
     audioEngine.setCueHotkey(id, hotkey);
     const failed = await syncHotkeys();
@@ -209,23 +313,48 @@ export function MixerBoard() {
     }
   }
 
+  if (compact) {
+    return (
+      <MiniRack
+        snap={snap}
+        started={started}
+        busy={busy}
+        onExpand={() => void setWindowMode("full")}
+        onPower={() => void bootAndRestore()}
+        onPlayCue={(id) => void runAction("cue", () => audioEngine.playCue(id))}
+        onChannelVolume={(id, v) => startTransition(() => audioEngine.setVolume(id, v))}
+        onMasterVolume={(v) => startTransition(() => audioEngine.setMasterVolume(v))}
+        onCueMasterVolume={(v) => startTransition(() => audioEngine.setCueMasterVolume(v))}
+        onToggleMasterMute={() => audioEngine.setMasterMuted(!snap.masterMuted)}
+        onToggleCueMasterMute={() => audioEngine.setCueMasterMuted(!snap.cueMasterMuted)}
+        onSelectDiscord={(id) =>
+          void runAction("sink", () => audioEngine.setDiscordOutputDevice(id))
+        }
+        mpdShared={mpd.name === "BPH Share"}
+      />
+    );
+  }
+
   return (
-    <div className="relative min-h-full overflow-hidden">
+    <div className="rack-shell relative h-dvh overflow-hidden">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_18%_0%,rgba(77,232,255,0.18),transparent_42%),radial-gradient(ellipse_at_85%_8%,rgba(255,79,216,0.16),transparent_40%)]" />
       <div className="pointer-events-none absolute inset-0 opacity-[0.12] [background-image:url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22%3E%3Cfilter id=%22n%22%3E%3CfeTurbulence type=%22fractalNoise%22 baseFrequency=%220.85%22 numOctaves=%222%22 stitchTiles=%22stitch%22/%3E%3C/filter%3E%3Crect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.55%22/%3E%3C/svg%3E')]" />
 
-      <main className="relative mx-auto flex w-full max-w-[1400px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-        <header className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-4 sm:gap-5">
+      <main className="relative mx-auto flex h-full w-full max-w-[1800px] flex-col gap-[var(--rack-gap)] px-[var(--rack-x)] py-[var(--rack-y)]">
+        <header className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3 sm:gap-4">
             {started ? (
-              <div className="logo-screen logo-screen--on shrink-0" aria-label="Badly Played Hub display">
+              <div
+                className="logo-screen logo-screen--on shrink-0"
+                aria-label="Badly Played Hub display"
+              >
                 <div className="logo-screen__glass">
                   <img
-                    src="/bph-logo.png"
+                    src={bphLogo}
                     alt="Badly Played Hub"
                     className="bph-logo"
-                    width={120}
-                    height={120}
+                    width={160}
+                    height={160}
                   />
                   <span className="logo-screen__standby">Standby</span>
                 </div>
@@ -240,11 +369,11 @@ export function MixerBoard() {
               >
                 <div className="logo-screen__glass">
                   <img
-                    src="/bph-logo.png"
+                    src={bphLogo}
                     alt=""
                     className="bph-logo"
-                    width={120}
-                    height={120}
+                    width={160}
+                    height={160}
                   />
                   <span className="logo-screen__standby">Standby</span>
                 </div>
@@ -254,7 +383,7 @@ export function MixerBoard() {
             <div className="min-w-0">
               <p
                 className={cn(
-                  "brand-eyebrow text-[0.7rem] font-semibold tracking-[0.28em] uppercase",
+                  "brand-eyebrow text-[length:var(--brand-eyebrow)] font-semibold tracking-[0.28em] uppercase",
                   started && "brand-eyebrow--on",
                 )}
               >
@@ -262,13 +391,13 @@ export function MixerBoard() {
               </p>
               <p
                 className={cn(
-                  "brand-wordmark mt-1 text-5xl leading-none sm:text-6xl",
+                  "brand-wordmark mt-0.5 text-[length:var(--brand-title)] leading-none",
                   started && "brand-wordmark--on",
                 )}
               >
                 MixLine
               </p>
-              <p className="mt-3 max-w-md text-sm leading-relaxed text-[color:var(--console-muted)] sm:text-base">
+              <p className="rack-help mt-1.5 max-w-2xl text-[length:var(--rack-copy)] leading-snug text-[color:var(--console-muted)]">
                 {started
                   ? "Neon rack for stream cues and Discord send — mix/mon, EQ, hotkeys, saved setups."
                   : "Hit Power on board — or tap the dark screen — and the logo boots with the rack."}
@@ -278,9 +407,16 @@ export function MixerBoard() {
 
           <div className="flex flex-wrap items-center gap-2 sm:justify-end">
             {isElectron ? (
-              <div className="inline-flex items-center gap-2 rounded-md border border-[color:var(--neon-cyan)]/25 bg-[color:var(--chip)] px-3 py-2 text-xs font-semibold tracking-wide text-[color:var(--console-ink)] uppercase">
-                Desktop app
-              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-9 rounded-md border-[color:var(--neon-cyan)]/30 bg-[color:var(--chip)] text-[color:var(--console-ink)] hover:bg-[color:var(--chip-hover)]"
+                onClick={() => void setWindowMode("compact")}
+                title="Mini mixer in the corner"
+              >
+                <Minimize2 className="size-4" />
+                Mini mixer
+              </Button>
             ) : null}
             <div className="inline-flex items-center gap-2 rounded-md border border-white/10 bg-[color:var(--chip)] px-3 py-2 text-xs text-[color:var(--console-muted)]">
               <Save className="size-3.5" />
@@ -296,7 +432,7 @@ export function MixerBoard() {
               <Button
                 type="button"
                 size="lg"
-                className="h-11 rounded-md border border-[color:var(--neon-magenta)]/40 bg-[linear-gradient(105deg,var(--neon-cyan),var(--neon-magenta))] px-5 font-semibold text-[#07080d] shadow-[0_0_24px_rgba(255,79,216,0.25)] hover:opacity-95"
+                className="h-9 rounded-md border border-[color:var(--neon-magenta)]/40 bg-[linear-gradient(105deg,var(--neon-cyan),var(--neon-magenta))] px-4 font-semibold text-[#07080d] shadow-[0_0_24px_rgba(255,79,216,0.25)] hover:opacity-95"
                 onClick={() => void bootAndRestore()}
               >
                 <Headphones className="size-4" />
@@ -352,31 +488,69 @@ export function MixerBoard() {
             void syncHotkeys();
           }}
           onHotkey={(id, hotkey) => void handleHotkey(id, hotkey)}
+          onReorder={(id, toIndex) => audioEngine.moveCue(id, toIndex)}
+          onPad={(id, pad) => audioEngine.setCuePad(id, pad)}
         />
 
-        <section className="rack-panel relative rounded-sm p-3 sm:p-4">
-          <div className="pointer-events-none absolute top-3 left-5 flex gap-2">
+        <section className="rack-panel relative flex min-h-0 flex-1 flex-col rounded-sm p-[var(--rack-pad)]">
+          <div className="pointer-events-none absolute top-2 left-3 flex gap-2">
             <span className="rack-screw" />
             <span className="rack-screw" />
           </div>
-          <div className="pointer-events-none absolute top-3 right-5 flex gap-2">
+          <div className="pointer-events-none absolute top-2 right-3 flex gap-2">
             <span className="rack-screw" />
             <span className="rack-screw" />
           </div>
-          <div className="mb-4 flex flex-col gap-3 border-b border-black/40 pb-4 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <h2 className="font-[family-name:var(--font-rack)] text-xl tracking-[0.14em] text-[color:var(--console-ink)] uppercase sm:text-2xl">
+          <div className="mb-[var(--rack-gap)] flex shrink-0 flex-col gap-2 border-b border-black/40 pb-[var(--rack-gap)] lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <h2 className="font-[family-name:var(--font-rack)] text-[length:var(--rack-title)] tracking-[0.14em] text-[color:var(--console-ink)] uppercase">
                 Channel rack
               </h2>
-              <p className="text-sm text-[color:var(--console-muted)]">
-                <span className="font-semibold text-[color:var(--console-ink)]">MON</span> = headphones only.{" "}
-                <span className="font-semibold text-[color:var(--console-ink)]">MIX</span> = Discord send.{" "}
-                <span className="font-semibold text-[color:var(--console-ink)]">EQ</span> opens the band view — click the strip name to return.
-                Cue Send is the master fader for every sound cue before it hits Mix.
+              <p className="rack-help text-[length:var(--rack-copy)] text-[color:var(--console-muted)]">
+                <span className="font-semibold text-[color:var(--console-ink)]">App</span> taps one program
+                (YouTube, Cursor, Discord).{" "}
+                <span className="font-semibold text-[color:var(--console-ink)]">MIX</span> sends that strip to
+                your output.{" "}
+                <span className="font-semibold text-[color:var(--console-ink)]">System</span> is every sound on
+                the PC. Cue Send is the master for sound cues.
               </p>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="relative flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-sm border px-2 py-1 text-[10px] font-bold tracking-[0.14em] uppercase",
+                  mpd.connected
+                    ? "border-[color:var(--meter-green)]/40 text-[color:var(--meter-green)]"
+                    : "border-white/10 text-[color:var(--console-muted)]",
+                  mpdMapOpen && "bg-white/5",
+                )}
+                title={
+                  mpd.name === "BPH Share"
+                    ? "Stream Controller has the MPD226 and is sharing every pad, slider, and knob with MixLine."
+                    : "Choose what the two free sliders and the four knobs control. Cue and Mix sliders stay put."
+                }
+                onClick={() => setMpdMapOpen((open) => !open)}
+              >
+                <span
+                  className={cn(
+                    "size-1.5 rounded-full",
+                    mpd.connected ? "bg-[color:var(--meter-green)] shadow-[0_0_6px_var(--meter-green)]" : "bg-white/25",
+                  )}
+                />
+                {mpd.connected ? (mpd.name === "BPH Share" ? "BPH Share" : "MPD226") : "MPD226 off"}
+              </button>
+              {mpdMapOpen ? (
+                <MpdAssignPanel
+                  channels={snap.channels}
+                  assign={mpdAssign}
+                  onChange={(next) => {
+                    setMpdAssign(next);
+                    saveMpdAssign(next);
+                  }}
+                />
+              ) : null}
               <SourceButton
                 icon={Mic}
                 label="Mic"
@@ -385,13 +559,13 @@ export function MixerBoard() {
               />
               <SourceButton
                 icon={AppWindow}
-                label="Application"
-                busy={busy === "app"}
+                label="App"
+                busy={busy === "app" || busy === "music"}
                 onClick={() => void openAppPicker()}
               />
               <SourceButton
                 icon={Monitor}
-                label="System sounds"
+                label="System"
                 busy={busy === "desktop"}
                 onClick={() =>
                   void runAction("desktop", () => audioEngine.addDesktop("System sounds"))
@@ -399,13 +573,13 @@ export function MixerBoard() {
               />
               <SourceButton
                 icon={Upload}
-                label="Audio file"
+                label="File"
                 busy={busy === "file"}
                 onClick={() => fileRef.current?.click()}
               />
               <SourceButton
                 icon={Radio}
-                label="Demo tone"
+                label="Tone"
                 busy={busy === "tone"}
                 onClick={() =>
                   void runAction("tone", () => audioEngine.addTone("Demo Tone"))
@@ -429,13 +603,14 @@ export function MixerBoard() {
           {error ? (
             <div
               role="alert"
-              className="mb-4 rounded-md border border-[color:var(--meter-red)]/40 bg-[color:var(--meter-red)]/10 px-3 py-2 text-sm text-[color:var(--console-ink)]"
+              className="mb-2 shrink-0 rounded-md border border-[color:var(--meter-red)]/40 bg-[color:var(--meter-red)]/10 px-3 py-2 text-sm text-[color:var(--console-ink)]"
             >
               {error}
             </div>
           ) : null}
 
-          <div className="flex gap-3 overflow-x-auto pb-2">
+          <div className="flex min-h-0 flex-1 gap-[var(--strip-gap)] overflow-hidden pb-1">
+            <div className="flex min-w-0 shrink gap-[var(--strip-gap)] overflow-x-auto overflow-y-hidden">
             {snap.channels.length === 0 ? (
               <EmptyRack onAddMic={() => void openMicPicker()} />
             ) : (
@@ -445,9 +620,13 @@ export function MixerBoard() {
                   channel={channel}
                   anySolo={snap.anySolo}
                   eqMode={eqChannelId === channel.id}
+                  fxMode={fxChannelId === channel.id}
                   inputDevices={snap.inputDevices}
                   onVolume={(v) =>
                     startTransition(() => audioEngine.setVolume(channel.id, v))
+                  }
+                  onBoost={(db) =>
+                    startTransition(() => audioEngine.setBoost(channel.id, db))
                   }
                   onMute={() => audioEngine.setMuted(channel.id, !channel.muted)}
                   onSolo={() => audioEngine.setSolo(channel.id, !channel.solo)}
@@ -458,6 +637,7 @@ export function MixerBoard() {
                   onRename={(name) => audioEngine.renameChannel(channel.id, name)}
                   onRemove={() => {
                     if (eqChannelId === channel.id) setEqChannelId(null);
+                    if (fxChannelId === channel.id) setFxChannelId(null);
                     audioEngine.removeChannel(channel.id);
                   }}
                   onMicDevice={
@@ -466,7 +646,7 @@ export function MixerBoard() {
                           void runAction("micdev", () =>
                             audioEngine.setMicDevice(channel.id, deviceId),
                           )
-                      : channel.kind === "app"
+                      : channel.kind === "app" && channel.captureMode === "device"
                         ? (deviceId) =>
                             void runAction("appdev", () =>
                               audioEngine.setAppDevice(channel.id, deviceId),
@@ -475,6 +655,7 @@ export function MixerBoard() {
                   }
                   onEnterEq={() => {
                     setEqBus(null);
+                    setFxChannelId(null);
                     setEqChannelId(channel.id);
                   }}
                   onExitEq={() => setEqChannelId(null)}
@@ -482,11 +663,21 @@ export function MixerBoard() {
                     startTransition(() => audioEngine.setEqGain(channel.id, bandId, gainDb))
                   }
                   onResetEq={() => audioEngine.resetEq(channel.id)}
+                  onEnterFx={() => {
+                    setEqBus(null);
+                    setEqChannelId(null);
+                    setFxChannelId(channel.id);
+                  }}
+                  onExitFx={() => setFxChannelId(null)}
+                  onFx={(patch) =>
+                    startTransition(() => audioEngine.setChannelFx(channel.id, patch))
+                  }
+                  onResetFx={() => audioEngine.resetChannelFx(channel.id)}
                 />
               ))
             )}
 
-            <div className="mx-1 hidden h-52 w-px shrink-0 self-center bg-black/50 sm:block" />
+            <div className="mx-1 hidden h-[var(--fader-h,13rem)] w-px shrink-0 self-center bg-black/50 sm:block" />
 
             <BusStrip
               title="Cue"
@@ -510,6 +701,9 @@ export function MixerBoard() {
               }
               onResetEq={() => audioEngine.resetBusEq("cue")}
             />
+            </div>
+
+            <div className="min-w-4 flex-1" />
 
             <BusStrip
               title="Mix"
@@ -520,18 +714,22 @@ export function MixerBoard() {
               peak={snap.masterPeak}
               rms={snap.masterRms}
               eq={snap.masterEq}
-              eqMode={eqBus === "master"}
+              eqMode={false}
+              showEq={false}
               onVolume={(v) => startTransition(() => audioEngine.setMasterVolume(v))}
               onMute={() => audioEngine.setMasterMuted(!snap.masterMuted)}
-              onEnterEq={() => {
-                setEqChannelId(null);
-                setEqBus("master");
-              }}
-              onExitEq={() => setEqBus(null)}
-              onEqGain={(bandId, gainDb) =>
-                startTransition(() => audioEngine.setBusEqGain("master", bandId, gainDb))
-              }
+              onEnterEq={() => undefined}
+              onExitEq={() => undefined}
+              onEqGain={() => undefined}
               onResetEq={() => audioEngine.resetBusEq("master")}
+            />
+
+            <LiveEq
+              bands={snap.masterEq}
+              onChange={(bandId, patch) =>
+                startTransition(() => audioEngine.setBusEq("master", bandId, patch))
+              }
+              onReset={() => audioEngine.resetBusEq("master")}
             />
           </div>
         </section>
@@ -539,15 +737,31 @@ export function MixerBoard() {
 
       {pickerOpen ? (
         <AddAppDialog
-          windows={appWindows}
+          apps={audioApps}
+          appsError={appsError}
           inputDevices={snap.inputDevices}
           onClose={() => setPickerOpen(false)}
+          onRefresh={() => void refreshAudioApps().catch((err) => {
+            setAppsError(err instanceof Error ? err.message : "Could not list open apps.");
+          })}
           onOpenWindowsSoundSettings={
             window.mixlineDesktop
               ? () => void window.mixlineDesktop?.openSoundSettings()
               : undefined
           }
-          onConfirm={(appName, deviceId) => {
+          onOpenWidget={
+            window.mixlineDesktop
+              ? (url, browser) => void window.mixlineDesktop?.openWidgetUrl(url, browser)
+              : undefined
+          }
+          onPickLocalMusic={pickLocalMusic}
+          onPickApp={(app) => {
+            setPickerOpen(false);
+            void runAction("app", () =>
+              audioEngine.addAppProcess({ pid: app.pid, name: app.name, exe: app.exe }),
+            );
+          }}
+          onConfirmCable={(appName, deviceId) => {
             setPickerOpen(false);
             void runAction("app", () => audioEngine.addAppDevice(deviceId, appName));
           }}
@@ -557,7 +771,7 @@ export function MixerBoard() {
       {micPickerOpen ? (
         <DeviceDialog
           title="Choose microphone"
-          subtitle="Pick your real mic — not CABLE Output (that one is for Discord)."
+          subtitle="Real mic only. Music apps are under Music — they never show up as mics."
           onClose={() => setMicPickerOpen(false)}
         >
           {snap.inputDevices.length === 0 ? (
@@ -661,11 +875,11 @@ function SourceButton({
       disabled={busy}
       onClick={onClick}
       className={cn(
-        "h-10 rounded-md border-[color:var(--console-edge)] bg-[color:var(--chip)] text-[color:var(--console-ink)] hover:bg-[color:var(--chip-hover)]",
+        "h-8 rounded-md border-[color:var(--console-edge)] bg-[color:var(--chip)] px-2.5 text-xs text-[color:var(--console-ink)] hover:bg-[color:var(--chip-hover)]",
         busy && "opacity-70",
       )}
     >
-      <Icon className="size-4" />
+      <Icon className="size-3.5" />
       {busy ? "…" : label}
     </Button>
   );

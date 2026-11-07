@@ -15,6 +15,9 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 4317,
     strictPort: true,
+    watch: {
+      ignored: ["**/release/**"],
+    },
   },
   build: {
     outDir: "dist",

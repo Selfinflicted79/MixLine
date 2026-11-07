@@ -1,9 +1,17 @@
-import { cloneDefaultEq, type EqBand } from "@/lib/eq-bands";
+import { cloneDefaultEq, dbToLinear, type EqBand } from "@/lib/eq-bands";
+import {
+  clampFx,
+  createFxGraph,
+  defaultFx,
+  makeImpulse,
+  type ChannelFx,
+  type FxGraph,
+} from "@/lib/fx-graph";
 
 export type ChannelKind = "mic" | "desktop" | "app" | "file" | "tone";
 
-/** How this strip gets audio. `device` = one input device only (isolated). `system` = Windows loopback of everything. */
-export type CaptureMode = "device" | "system" | "none";
+/** How this strip gets audio. `process` = one app (OBS-style). `device` = one input. `system` = all PC audio. */
+export type CaptureMode = "device" | "system" | "process" | "none";
 
 export type ChannelSnapshot = {
   id: string;
@@ -22,6 +30,9 @@ export type ChannelSnapshot = {
   captureMode: CaptureMode;
   needsReconnect: boolean;
   eq: EqBand[];
+  fx: ChannelFx;
+  /** Input trim in dB, 0..24. Raises a quiet source before the fader. */
+  boostDb: number;
 };
 
 export type AudioDevice = {
@@ -43,6 +54,8 @@ export type CuePad = {
   solo: boolean;
   toMix: boolean;
   monitor: boolean;
+  /** MPD226 pad 0–15. Null until the cue is assigned. */
+  pad: number | null;
   peak: number;
   rms: number;
 };
@@ -86,9 +99,17 @@ type ChannelNodes = {
   needsReconnect: boolean;
   stream: MediaStream | null;
   source: AudioNode | null;
+  captureId: string | null;
+  pump: ScriptProcessorNode | null;
+  pcmRing: PcmRing | null;
+  pcmKeepAlive: ConstantSourceNode | null;
   inputGain: GainNode;
+  boostGain: GainNode;
+  boostDb: number;
   eqBands: EqBand[];
   eqFilters: BiquadFilterNode[];
+  fx: ChannelFx;
+  fxGraph: FxGraph;
   analyser: AnalyserNode;
   gate: GainNode;
   monGate: GainNode;
@@ -107,6 +128,8 @@ type CueNodes = {
   buffer: AudioBuffer;
   hotkey: string | null;
   fileId?: string;
+  /** MPD226 pad 0–15, or null when this cue is not on a pad. */
+  pad: number | null;
   volume: number;
   muted: boolean;
   solo: boolean;
@@ -146,6 +169,8 @@ export type SavedSetup = {
     deviceLabel?: string;
     captureMode?: CaptureMode;
     eq: EqBand[];
+    fx?: ChannelFx;
+    boostDb?: number;
   }>;
   cues: Array<{
     id: string;
@@ -153,6 +178,7 @@ export type SavedSetup = {
     builtin?: boolean;
     hotkey: string | null;
     fileId?: string;
+    pad?: number | null;
     volume?: number;
     muted?: boolean;
     solo?: boolean;
@@ -163,6 +189,46 @@ export type SavedSetup = {
 
 function uid(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+/** Stereo ring the app tap writes on the main thread and the mixer reads each buffer. */
+class PcmRing {
+  private left: Float32Array;
+  private right: Float32Array;
+  private read = 0;
+  private write = 0;
+  private readonly size: number;
+
+  constructor(seconds = 1) {
+    this.size = Math.floor(48000 * seconds);
+    this.left = new Float32Array(this.size);
+    this.right = new Float32Array(this.size);
+  }
+
+  push(left: number, right: number) {
+    this.left[this.write] = left;
+    this.right[this.write] = right;
+    this.write++;
+    if (this.write === this.size) this.write = 0;
+    if (this.write === this.read) {
+      this.read++;
+      if (this.read === this.size) this.read = 0;
+    }
+  }
+
+  pull(left: Float32Array, right: Float32Array) {
+    for (let i = 0; i < left.length; i++) {
+      if (this.read === this.write) {
+        left[i] = 0;
+        right[i] = 0;
+        continue;
+      }
+      left[i] = this.left[this.read];
+      right[i] = this.right[this.read];
+      this.read++;
+      if (this.read === this.size) this.read = 0;
+    }
+  }
 }
 
 function dbFromLinear(v: number) {
@@ -241,12 +307,18 @@ export class AudioEngine {
   private masterPeak = 0;
   private masterRms = 0;
   private masterTimeData: Float32Array | null = null;
+  private spectrumAnalyser: AnalyserNode | null = null;
+  private spectrumData: Float32Array | null = null;
   private cueMasterPeak = 0;
   private cueMasterRms = 0;
   private cueMasterTimeData: Float32Array | null = null;
   private raf = 0;
   private listeners = new Set<(snap: MixerSnapshot) => void>();
   private peakHoldDecay = 0.96;
+  private pcmUnsub: (() => void) | null = null;
+  private endedUnsub: (() => void) | null = null;
+  private impulse: AudioBuffer | null = null;
+  private pendingPcm = new Map<string, Uint8Array[]>();
 
   subscribe(fn: (snap: MixerSnapshot) => void) {
     this.listeners.add(fn);
@@ -283,6 +355,8 @@ export class AudioEngine {
         captureMode: c.captureMode,
         needsReconnect: c.needsReconnect,
         eq: c.eqBands.map((b) => ({ ...b })),
+        fx: { ...c.fx },
+        boostDb: c.boostDb,
       })),
       masterVolume: this.masterVolume,
       masterMuted: this.masterMuted,
@@ -307,6 +381,7 @@ export class AudioEngine {
         builtin: c.builtin,
         hotkey: c.hotkey,
         fileId: c.fileId,
+        pad: c.pad,
         volume: c.volume,
         muted: c.muted,
         solo: c.solo,
@@ -324,7 +399,7 @@ export class AudioEngine {
 
   async start() {
     if (!this.ctx) {
-      this.ctx = new AudioContext();
+      this.ctx = new AudioContext({ sampleRate: 48000 });
       this.mixBus = this.ctx.createGain();
       this.mixBus.gain.value = 1;
       this.cueBus = this.ctx.createGain();
@@ -344,6 +419,11 @@ export class AudioEngine {
       this.masterAnalyser.fftSize = 2048;
       this.masterAnalyser.smoothingTimeConstant = 0.35;
       this.masterTimeData = new Float32Array(this.masterAnalyser.fftSize);
+      const spectrum = this.ctx.createAnalyser();
+      spectrum.fftSize = 2048;
+      spectrum.smoothingTimeConstant = 0.82;
+      this.spectrumAnalyser = spectrum;
+      this.spectrumData = new Float32Array(spectrum.frequencyBinCount);
       this.masterEqBands = cloneDefaultEq();
       this.masterEqFilters = this.createEqChain(this.masterEqBands).filters;
 
@@ -374,10 +454,11 @@ export class AudioEngine {
       const masterEqOut = this.masterEqFilters[this.masterEqFilters.length - 1];
       if (masterEqIn && masterEqOut) {
         this.mixBus.connect(masterEqIn);
-        masterEqOut.connect(this.masterGain);
+        masterEqOut.connect(spectrum);
       } else {
-        this.mixBus.connect(this.masterGain);
+        this.mixBus.connect(spectrum);
       }
+      spectrum.connect(this.masterGain);
       this.masterGain.connect(this.masterAnalyser);
       this.masterAnalyser.connect(this.discordGain);
       this.discordGain.connect(this.mixDestination);
@@ -442,6 +523,7 @@ export class AudioEngine {
       buffer,
       hotkey: opts?.hotkey ?? null,
       fileId: opts?.fileId,
+      pad: opts?.pad ?? null,
       volume: opts?.volume ?? 0.85,
       muted: opts?.muted ?? false,
       solo: opts?.solo ?? false,
@@ -602,6 +684,7 @@ export class AudioEngine {
       name: string;
       fileId?: string;
       hotkey?: string | null;
+      pad?: number | null;
       volume?: number;
       muted?: boolean;
       solo?: boolean;
@@ -618,6 +701,7 @@ export class AudioEngine {
       this.makeCueNodes(id, meta.name, buffer, {
         fileId: meta.fileId,
         hotkey: meta.hotkey ?? null,
+        pad: meta.pad ?? null,
         volume: meta.volume,
         muted: meta.muted,
         solo: meta.solo,
@@ -634,6 +718,23 @@ export class AudioEngine {
     const cue = this.cues.get(id);
     if (!cue) return;
     cue.hotkey = hotkey;
+    this.emit();
+  }
+
+  /** Assign an MPD226 pad (0–15). Null clears it. One pad plays one cue. */
+  setCuePad(id: string, pad: number | null) {
+    const cue = this.cues.get(id);
+    if (!cue) return;
+    if (pad === null) {
+      cue.pad = null;
+      this.emit();
+      return;
+    }
+    const next = Math.min(15, Math.max(0, Math.round(pad)));
+    for (const other of this.cues.values()) {
+      if (other.id !== id && other.pad === next) other.pad = null;
+    }
+    cue.pad = next;
     this.emit();
   }
 
@@ -734,6 +835,8 @@ export class AudioEngine {
           deviceLabel: c.deviceLabel,
           captureMode: c.captureMode,
           eq: c.eqBands.map((b) => ({ ...b })),
+          fx: { ...c.fx },
+          boostDb: c.boostDb,
         })),
       cues: [...this.cues.values()].map((c) => ({
         id: c.id,
@@ -741,6 +844,7 @@ export class AudioEngine {
         builtin: c.builtin,
         hotkey: c.hotkey,
         fileId: c.fileId,
+        pad: c.pad,
         volume: c.volume,
         muted: c.muted,
         solo: c.solo,
@@ -759,6 +863,8 @@ export class AudioEngine {
       toMix: boolean;
       monitor?: boolean;
       eq?: EqBand[];
+      fx?: ChannelFx;
+      boostDb?: number;
     },
   ) {
     const ch = this.channels.get(channelId);
@@ -769,12 +875,32 @@ export class AudioEngine {
     ch.solo = settings.solo;
     ch.toMix = settings.toMix;
     if (typeof settings.monitor === "boolean") ch.monitor = settings.monitor;
+    if (typeof settings.boostDb === "number") {
+      ch.boostDb = Math.min(24, Math.max(0, settings.boostDb));
+      ch.boostGain.gain.value = dbToLinear(ch.boostDb);
+    }
     if (settings.eq) {
       ch.eqBands = settings.eq.map((b) => ({ ...b }));
       this.applyFilterParams(ch);
     }
+    if (settings.fx) {
+      ch.fx = clampFx(settings.fx);
+      ch.fxGraph.apply(ch.fx);
+    }
     this.applyRouting();
     this.emit();
+  }
+
+  setChannelFx(channelId: string, patch: Partial<ChannelFx>) {
+    const ch = this.channels.get(channelId);
+    if (!ch) return;
+    ch.fx = clampFx({ ...ch.fx, ...patch });
+    ch.fxGraph.apply(ch.fx);
+    this.emit();
+  }
+
+  resetChannelFx(channelId: string) {
+    this.setChannelFx(channelId, defaultFx());
   }
 
   private startMeterLoop() {
@@ -900,12 +1026,15 @@ export class AudioEngine {
   ): ChannelNodes | null {
     if (!this.ctx || !this.mixBus) return null;
     if (!this.monitorBus) return null;
+    const boostGain = this.ctx.createGain();
     const inputGain = this.ctx.createGain();
     const analyser = this.ctx.createAnalyser();
     const gate = this.ctx.createGain();
     const monGate = this.ctx.createGain();
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.35;
+    boostGain.gain.value = 1;
+    boostGain.connect(inputGain);
     inputGain.gain.value = 0.75;
     gate.gain.value = 1;
     monGate.gain.value = 0;
@@ -913,12 +1042,17 @@ export class AudioEngine {
     const { bands, filters } = this.createEqChain(opts?.eqBands ?? cloneDefaultEq());
     const eqIn = filters[0];
     const eqOut = filters[filters.length - 1];
+    if (!this.impulse) this.impulse = makeImpulse(this.ctx);
+    const fxGraph = createFxGraph(this.ctx, this.impulse);
+    const fx = defaultFx();
+    fxGraph.apply(fx);
     if (eqIn && eqOut) {
       inputGain.connect(eqIn);
-      eqOut.connect(analyser);
+      eqOut.connect(fxGraph.input);
     } else {
-      inputGain.connect(analyser);
+      inputGain.connect(fxGraph.input);
     }
+    fxGraph.output.connect(analyser);
     analyser.connect(gate);
     analyser.connect(monGate);
     gate.connect(this.mixBus);
@@ -944,9 +1078,17 @@ export class AudioEngine {
       needsReconnect: opts?.needsReconnect ?? false,
       stream: null,
       source: null,
+      captureId: null,
+      pump: null,
+      pcmRing: null,
+      pcmKeepAlive: null,
       inputGain,
+      boostGain,
+      boostDb: 0,
       eqBands: bands,
       eqFilters: filters,
+      fx,
+      fxGraph,
       analyser,
       gate,
       monGate,
@@ -1013,34 +1155,114 @@ export class AudioEngine {
   }
 
   setBusEqGain(bus: "master" | "cue", bandId: string, gainDb: number) {
+    this.setBusEq(bus, bandId, { gainDb });
+  }
+
+  setBusEq(
+    bus: "master" | "cue",
+    bandId: string,
+    patch: { gainDb?: number; frequency?: number },
+  ) {
     const bands = bus === "master" ? this.masterEqBands : this.cueEqBands;
     const filters = bus === "master" ? this.masterEqFilters : this.cueEqFilters;
     const band = bands.find((b) => b.id === bandId);
     if (!band) return;
-    band.gainDb = Math.min(12, Math.max(-12, gainDb));
+    if (typeof patch.gainDb === "number") {
+      band.gainDb = Math.min(12, Math.max(-12, patch.gainDb));
+    }
+    if (typeof patch.frequency === "number") {
+      band.frequency = Math.min(16000, Math.max(40, patch.frequency));
+    }
     const idx = bands.findIndex((b) => b.id === bandId);
     const filter = filters[idx];
+    const now = this.ctx?.currentTime ?? 0;
     if (filter) {
-      filter.gain.setTargetAtTime(band.gainDb, this.ctx?.currentTime ?? 0, 0.01);
+      filter.gain.setTargetAtTime(band.gainDb, now, 0.01);
+      filter.frequency.setTargetAtTime(band.frequency, now, 0.01);
     }
     this.emit();
   }
 
   resetBusEq(bus: "master" | "cue") {
     const next = cloneDefaultEq();
-    if (bus === "master") {
-      this.masterEqBands = next;
-      next.forEach((band, i) => {
-        const filter = this.masterEqFilters[i];
-        if (filter) filter.gain.setTargetAtTime(band.gainDb, this.ctx?.currentTime ?? 0, 0.01);
-      });
-    } else {
-      this.cueEqBands = next;
-      next.forEach((band, i) => {
-        const filter = this.cueEqFilters[i];
-        if (filter) filter.gain.setTargetAtTime(band.gainDb, this.ctx?.currentTime ?? 0, 0.01);
-      });
+    const filters = bus === "master" ? this.masterEqFilters : this.cueEqFilters;
+    if (bus === "master") this.masterEqBands = next;
+    else this.cueEqBands = next;
+    const now = this.ctx?.currentTime ?? 0;
+    next.forEach((band, i) => {
+      const filter = filters[i];
+      if (!filter) return;
+      filter.gain.setTargetAtTime(band.gainDb, now, 0.01);
+      filter.frequency.setTargetAtTime(band.frequency, now, 0.01);
+    });
+    this.emit();
+  }
+
+  /** Pre-fader trim. 0 dB is unity; +24 dB lifts a quiet player into Discord. */
+  setBoost(id: string, boostDb: number) {
+    const ch = this.channels.get(id);
+    if (!ch) return;
+    ch.boostDb = Math.min(24, Math.max(0, boostDb));
+    ch.boostGain.gain.setTargetAtTime(
+      dbToLinear(ch.boostDb),
+      this.ctx?.currentTime ?? 0,
+      0.015,
+    );
+    this.emit();
+  }
+
+  get spectrumBinCount() {
+    return this.spectrumAnalyser?.frequencyBinCount ?? 1024;
+  }
+
+  /** Live spectrum after the master EQ, before the Mix fader. */
+  readMasterSpectrum(target: Float32Array) {
+    const analyser = this.spectrumAnalyser;
+    const data = this.spectrumData;
+    if (!analyser || !data) {
+      target.fill(-100);
+      return;
     }
+    analyser.getFloatFrequencyData(data as Float32Array<ArrayBuffer>);
+    if (target.length === data.length) {
+      target.set(data);
+      return;
+    }
+    const step = data.length / Math.max(1, target.length);
+    for (let i = 0; i < target.length; i++) {
+      const start = Math.floor(i * step);
+      const end = Math.min(data.length, Math.max(start + 1, Math.floor((i + 1) * step)));
+      let peak = -140;
+      for (let j = start; j < end; j++) {
+        const value = data[j] ?? -140;
+        if (value > peak) peak = value;
+      }
+      target[i] = peak;
+    }
+  }
+
+  moveCue(id: string, toIndex: number) {
+    const entries = [...this.cues.entries()];
+    const from = entries.findIndex(([cueId]) => cueId === id);
+    if (from < 0) return;
+    const [item] = entries.splice(from, 1);
+    if (!item) return;
+    const index = Math.min(entries.length, Math.max(0, Math.round(toIndex)));
+    entries.splice(index, 0, item);
+    this.cues = new Map(entries);
+    this.emit();
+  }
+
+  orderCues(ids: string[]) {
+    const next = new Map<string, CueNodes>();
+    for (const id of ids) {
+      const cue = this.cues.get(id);
+      if (cue) next.set(id, cue);
+    }
+    for (const [id, cue] of this.cues) {
+      if (!next.has(id)) next.set(id, cue);
+    }
+    this.cues = next;
     this.emit();
   }
 
@@ -1049,7 +1271,7 @@ export class AudioEngine {
     this.detachSource(channel);
     channel.stream = stream;
     const source = this.ctx.createMediaStreamSource(stream);
-    source.connect(channel.inputGain);
+    source.connect(channel.boostGain);
     channel.source = source;
     channel.connected = stream.getAudioTracks().some((t) => t.readyState === "live");
     stream.getAudioTracks().forEach((track) => {
@@ -1070,6 +1292,31 @@ export class AudioEngine {
       /* already disconnected */
     }
     channel.source = null;
+    if (channel.pump) {
+      channel.pump.onaudioprocess = null;
+      try {
+        channel.pump.disconnect();
+      } catch {
+        /* already disconnected */
+      }
+      channel.pump = null;
+    }
+    if (channel.pcmKeepAlive) {
+      try {
+        channel.pcmKeepAlive.stop();
+        channel.pcmKeepAlive.disconnect();
+      } catch {
+        /* already stopped */
+      }
+      channel.pcmKeepAlive = null;
+    }
+    channel.pcmRing = null;
+    if (channel.captureId && window.mixlineDesktop) {
+      const id = channel.captureId;
+      channel.captureId = null;
+      this.pendingPcm.delete(id);
+      void window.mixlineDesktop.stopAppCapture(id);
+    }
     if (channel.stream) {
       channel.stream.getTracks().forEach((t) => t.stop());
       channel.stream = null;
@@ -1157,10 +1404,93 @@ export class AudioEngine {
     await this.refreshDevices();
   }
 
+  private ensurePcmListener() {
+    if (!window.mixlineDesktop || this.pcmUnsub) return;
+    this.pcmUnsub = window.mixlineDesktop.onAppPcm((id, bytes) => this.onAppPcm(id, bytes));
+    this.endedUnsub = window.mixlineDesktop.onAppCaptureEnded((info) => {
+      for (const ch of this.channels.values()) {
+        if (ch.captureId !== info.id) continue;
+        ch.connected = false;
+        ch.needsReconnect = true;
+        this.applyRouting();
+        this.emit();
+      }
+    });
+  }
+
+  private onAppPcm(id: string, bytes: Uint8Array) {
+    const channel = [...this.channels.values()].find((ch) => ch.captureId === id);
+    if (!channel?.pcmRing) {
+      const queued = this.pendingPcm.get(id) ?? [];
+      queued.push(bytes);
+      if (queued.length > 24) queued.shift();
+      this.pendingPcm.set(id, queued);
+      return;
+    }
+    this.writePcm(channel, bytes);
+  }
+
+  private writePcm(channel: ChannelNodes, bytes: Uint8Array) {
+    const ring = channel.pcmRing;
+    if (!ring || bytes.byteLength < 4) return;
+    const usable = bytes.byteLength - (bytes.byteLength % 4);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, usable);
+    const frames = usable / 4;
+    for (let i = 0; i < frames; i++) {
+      ring.push(view.getInt16(i * 4, true) / 32768, view.getInt16(i * 4 + 2, true) / 32768);
+    }
+  }
+
   /**
-   * Isolated app strip: captures ONE audio input device only.
-   * Route YouTube/Game/etc. to its own virtual cable in Windows, then pick that cable here.
-   * This does NOT grab system/game/cue audio the way window capture does on Windows.
+   * OBS-style app tap: only this process (and its children). Game and other apps stay out.
+   * MIX still sends the strip to the selected output (VB-Cable).
+   */
+  async addAppProcess(app: { pid: number; name: string; exe: string }) {
+    await this.ensureRunning();
+    if (!this.ctx) throw new Error("Engine not ready");
+    if (!window.mixlineDesktop?.startAppCapture) {
+      throw new Error("Per-app capture only works in the MixLine desktop app.");
+    }
+    this.ensurePcmListener();
+    const { id: captureId } = await window.mixlineDesktop.startAppCapture(app.pid);
+    const channel = this.createChannelShell("app", app.name, {
+      captureMode: "process",
+      toMix: true,
+      deviceId: `proc:${app.exe}`,
+      deviceLabel: app.name,
+    });
+    if (!channel) {
+      await window.mixlineDesktop.stopAppCapture(captureId);
+      throw new Error("Engine not ready");
+    }
+    const ring = new PcmRing();
+    const pump = this.ctx.createScriptProcessor(2048, 1, 2);
+    pump.onaudioprocess = (event) => {
+      ring.pull(event.outputBuffer.getChannelData(0), event.outputBuffer.getChannelData(1));
+    };
+    const keepAlive = this.ctx.createConstantSource();
+    keepAlive.offset.value = 0;
+    keepAlive.connect(pump);
+    keepAlive.start();
+    pump.connect(channel.boostGain);
+    channel.source = pump;
+    channel.pump = pump;
+    channel.pcmRing = ring;
+    channel.pcmKeepAlive = keepAlive;
+    channel.captureId = captureId;
+    channel.connected = true;
+    const queued = this.pendingPcm.get(captureId);
+    if (queued) {
+      for (const chunk of queued) this.writePcm(channel, chunk);
+      this.pendingPcm.delete(captureId);
+    }
+    this.applyRouting();
+    this.emit();
+    return channel.id;
+  }
+
+  /**
+   * Fallback: one input device (a second virtual cable). Prefer addAppProcess.
    */
   async addAppDevice(deviceId: string, name?: string) {
     await this.ensureRunning();
@@ -1211,9 +1541,11 @@ export class AudioEngine {
     solo: boolean;
     toMix: boolean;
     eq?: EqBand[];
+    captureMode?: CaptureMode;
+    boostDb?: number;
   }) {
     const channel = this.createChannelShell("app", saved.name, {
-      captureMode: "device",
+      captureMode: saved.captureMode ?? "device",
       toMix: saved.toMix,
       deviceId: saved.deviceId,
       deviceLabel: saved.deviceLabel || saved.name,
@@ -1223,6 +1555,10 @@ export class AudioEngine {
     if (!channel) throw new Error("Engine not ready");
     channel.volume = saved.volume;
     channel.inputGain.gain.value = saved.volume;
+    if (typeof saved.boostDb === "number") {
+      channel.boostDb = Math.min(24, Math.max(0, saved.boostDb));
+      channel.boostGain.gain.value = dbToLinear(channel.boostDb);
+    }
     channel.muted = saved.muted;
     channel.solo = saved.solo;
     channel.connected = false;
@@ -1314,7 +1650,7 @@ export class AudioEngine {
     el.crossOrigin = "anonymous";
     await el.play();
     const source = this.ctx.createMediaElementSource(el);
-    source.connect(channel.inputGain);
+    source.connect(channel.boostGain);
     channel.source = source;
     channel.fileElement = el;
     channel.connected = true;
@@ -1338,7 +1674,7 @@ export class AudioEngine {
     osc.frequency.value = 220 + this.channels.size * 55;
     toneGain.gain.value = 0.2;
     osc.connect(toneGain);
-    toneGain.connect(channel.inputGain);
+    toneGain.connect(channel.boostGain);
     osc.start();
     channel.toneOsc = osc;
     channel.toneGain = toneGain;
@@ -1405,8 +1741,10 @@ export class AudioEngine {
     if (!ch) return;
     this.detachSource(ch);
     try {
+      ch.boostGain.disconnect();
       ch.inputGain.disconnect();
       ch.eqFilters.forEach((f) => f.disconnect());
+      ch.fxGraph.dispose();
       ch.analyser.disconnect();
       ch.gate.disconnect();
       ch.monGate.disconnect();
@@ -1420,6 +1758,10 @@ export class AudioEngine {
 
   dispose() {
     cancelAnimationFrame(this.raf);
+    this.pcmUnsub?.();
+    this.endedUnsub?.();
+    this.pcmUnsub = null;
+    this.endedUnsub = null;
     for (const id of [...this.channels.keys()]) this.removeChannel(id);
     for (const id of [...this.cues.keys()]) {
       if (!this.cues.get(id)?.builtin) this.removeCue(id);

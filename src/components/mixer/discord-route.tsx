@@ -22,25 +22,27 @@ export function DiscordRoute({
   );
 
   return (
-    <section className="rack-panel relative rounded-sm p-4 sm:p-5">
-      <div className="pointer-events-none absolute top-3 left-5 flex gap-2">
+    <section className="rack-panel relative shrink-0 rounded-sm p-[var(--rack-pad)]">
+      <div className="pointer-events-none absolute top-2 left-3 flex gap-2">
         <span className="rack-screw" />
         <span className="rack-screw" />
       </div>
-      <div className="pointer-events-none absolute top-3 right-5 flex gap-2">
+      <div className="pointer-events-none absolute top-2 right-3 flex gap-2">
         <span className="rack-screw" />
         <span className="rack-screw" />
       </div>
 
       <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="font-[family-name:var(--font-display)] text-2xl tracking-[0.06em] text-[color:var(--console-ink)] uppercase">
+        <div className="min-w-0">
+          <h2 className="font-[family-name:var(--font-rack)] text-[length:var(--rack-title)] tracking-[0.14em] text-[color:var(--console-ink)] uppercase">
             Discord send
           </h2>
-          <p className="mt-1 max-w-2xl text-sm text-[color:var(--console-muted)]">
-            Mix output → <span className="font-semibold text-[color:var(--console-ink)]">CABLE Input</span>.
-            Discord mic → <span className="font-semibold text-[color:var(--console-ink)]">CABLE Output</span>.
-            Use each strip’s <span className="font-semibold text-[color:var(--console-ink)]">MON</span> to hear that input in your headphones without sending it to Discord.
+          <p className="rack-help mt-1 max-w-4xl text-[length:var(--rack-copy)] text-[color:var(--console-muted)]">
+            Discord only hears MixLine’s <span className="font-semibold text-[color:var(--console-ink)]">Mix</span> bus
+            (strips with MIX on) — not your desktop. Mix →{" "}
+            <span className="font-semibold text-[color:var(--console-ink)]">CABLE Input</span>, Discord mic →{" "}
+            <span className="font-semibold text-[color:var(--console-ink)]">CABLE Output</span>.{" "}
+            <span className="font-semibold text-[color:var(--console-ink)]">MON</span> = headphones only.
           </p>
         </div>
         <Button
@@ -53,13 +55,13 @@ export function DiscordRoute({
         </Button>
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_auto]">
+      <div className="mt-[var(--rack-gap)] grid gap-3 lg:grid-cols-[1fr_auto]">
         <label className="block text-sm text-[color:var(--console-ink)]">
-          <span className="mb-1.5 block text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
+          <span className="mb-1 block text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
             Mix → virtual cable
           </span>
           <select
-            className="h-10 w-full rounded-sm border border-[color:var(--console-edge)] bg-[color:var(--chip)] px-3 text-sm outline-none focus:ring-2 focus:ring-[color:var(--accent-blue)]"
+            className="h-9 w-full rounded-sm border border-[color:var(--console-edge)] bg-[color:var(--chip)] px-3 text-sm outline-none focus:ring-2 focus:ring-[color:var(--accent-blue)]"
             value={snap.discordDeviceId}
             onChange={(e) => onSelectDevice(e.target.value)}
           >

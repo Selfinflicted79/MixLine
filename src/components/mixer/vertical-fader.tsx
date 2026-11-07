@@ -7,6 +7,8 @@ type VerticalFaderProps = {
   disabled?: boolean;
   label?: string;
   className?: string;
+  /** Pocket mixer: full-width slot, smaller cap, no dB scale. */
+  dense?: boolean;
   /** Accent glow on the cap — PreSonus orange / X32 cyan vibes */
   accent?: "cyan" | "orange" | "green" | "red";
 };
@@ -44,12 +46,35 @@ export function VerticalFader({
   disabled,
   label = "Volume",
   className,
+  dense = false,
   accent = "cyan",
 }: VerticalFaderProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
   const [active, setActive] = useState(false);
   const theme = accents[accent];
+  valueRef.current = value;
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (disabled) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      const step = Math.max(-0.015, Math.min(0.015, -dy / 8000));
+      if (step === 0) return;
+      const next = Math.min(1, Math.max(0, valueRef.current + step));
+      valueRef.current = next;
+      onChangeRef.current(next);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [disabled]);
 
   useEffect(() => {
     const onMove = (clientY: number) => {
@@ -80,19 +105,27 @@ export function VerticalFader({
   const pct = value * 100;
 
   return (
-    <div className={cn("flex h-52 w-12 flex-col items-center gap-1", className)}>
+    <div
+      className={cn(
+        "flex w-12 flex-col items-center gap-1",
+        !className?.includes("h-") && "h-[var(--fader-h,13rem)]",
+        className,
+      )}
+    >
       <div className="relative h-full w-full">
         {/* X32-style dB scale */}
-        <div className="pointer-events-none absolute inset-y-1 left-0 flex w-3 flex-col justify-between text-[7px] leading-none font-bold text-white/35">
-          <span>10</span>
-          <span>5</span>
-          <span>0</span>
-          <span>5</span>
-          <span>10</span>
-          <span>20</span>
-          <span>30</span>
-          <span>∞</span>
-        </div>
+        {dense ? null : (
+          <div className="pointer-events-none absolute inset-y-1 left-0 flex w-3 flex-col justify-between text-[7px] leading-none font-bold text-white/35">
+            <span>10</span>
+            <span>5</span>
+            <span>0</span>
+            <span>5</span>
+            <span>10</span>
+            <span>20</span>
+            <span>30</span>
+            <span>∞</span>
+          </div>
+        )}
 
         <div
           ref={trackRef}
@@ -103,7 +136,8 @@ export function VerticalFader({
           aria-valuenow={Math.round(pct)}
           tabIndex={disabled ? -1 : 0}
           className={cn(
-            "absolute top-0 right-1 bottom-0 left-3.5 cursor-ns-resize touch-none rounded-[2px] border border-black outline-none",
+            "absolute top-0 bottom-0 cursor-ns-resize touch-none rounded-[2px] border border-black outline-none",
+            dense ? "inset-x-0" : "right-1 left-3.5",
             "bg-[linear-gradient(90deg,#050607_0%,#181a1e_40%,#0a0b0d_100%)]",
             "shadow-[inset_1px_0_0_rgba(255,255,255,0.07),inset_-1px_0_0_rgba(0,0,0,0.75),inset_0_0_6px_rgba(0,0,0,0.55)]",
             disabled && "cursor-not-allowed opacity-50",
@@ -162,9 +196,12 @@ export function VerticalFader({
 
           {/* PreSonus × X32 lit fader cap */}
           <div
-            className="absolute left-1/2 z-10 flex h-9 w-10 -translate-x-1/2 flex-col items-center justify-center rounded-[3px] border border-black/90"
+            className={cn(
+              "pointer-events-none absolute left-1/2 z-10 flex -translate-x-1/2 flex-col items-center justify-center rounded-[3px] border border-black/90",
+              dense ? "h-6 w-[88%]" : "h-9 w-10",
+            )}
             style={{
-              bottom: `calc(${pct}% - 16px)`,
+              bottom: `calc(${pct}% - ${dense ? 12 : 16}px)`,
               background: theme.capBody,
               boxShadow: `${theme.glow}, inset 0 1px 0 rgba(255,255,255,0.45), inset 0 -2px 0 rgba(0,0,0,0.35), 0 2px 3px rgba(0,0,0,0.55)`,
             }}

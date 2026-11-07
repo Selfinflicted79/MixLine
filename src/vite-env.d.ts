@@ -11,6 +11,14 @@ export type HotkeyBinding = {
   accelerator: string;
 };
 
+export type AudioAppInfo = {
+  pid: number;
+  name: string;
+  exe: string;
+  hint: string;
+  state: "active" | "inactive";
+};
+
 export type MixlineDesktopApi = {
   isElectron: true;
   getDesktopSources: () => Promise<DesktopSource[]>;
@@ -25,6 +33,19 @@ export type MixlineDesktopApi = {
     bindings: HotkeyBinding[],
   ) => Promise<{ ok: boolean; failed: string[] }>;
   openSoundSettings: () => Promise<boolean>;
+  openWidgetUrl: (url: string, browser?: "edge" | "chrome") => Promise<{ ok: boolean }>;
+  listAudioApps: () => Promise<AudioAppInfo[]>;
+  startAppCapture: (pid: number) => Promise<{ id: string }>;
+  stopAppCapture: (id: string) => Promise<boolean>;
+  onAppPcm: (handler: (id: string, bytes: Uint8Array) => void) => () => void;
+  onAppCaptureEnded: (
+    handler: (info: { id: string; code: number | null; error: string }) => void,
+  ) => () => void;
+  getWindowMode: () => Promise<"full" | "compact">;
+  setWindowMode: (
+    mode: "full" | "compact",
+  ) => Promise<{ ok: boolean; mode: "full" | "compact" }>;
+  onWindowMode: (handler: (mode: "full" | "compact") => void) => () => void;
   onHotkey: (handler: (cueId: string) => void) => () => void;
 };
 

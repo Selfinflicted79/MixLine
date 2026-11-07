@@ -12,6 +12,30 @@ contextBridge.exposeInMainWorld("mixlineDesktop", {
   deleteCueFile: (fileId) => ipcRenderer.invoke("mixline:delete-cue-file", fileId),
   registerHotkeys: (bindings) => ipcRenderer.invoke("mixline:register-hotkeys", bindings),
   openSoundSettings: () => ipcRenderer.invoke("mixline:open-sound-settings"),
+  openWidgetUrl: (url, browser) => ipcRenderer.invoke("mixline:open-widget-url", url, browser),
+  listAudioApps: () => ipcRenderer.invoke("mixline:list-audio-apps"),
+  startAppCapture: (pid) => ipcRenderer.invoke("mixline:start-app-capture", pid),
+  stopAppCapture: (id) => ipcRenderer.invoke("mixline:stop-app-capture", id),
+  onAppPcm: (handler) => {
+    const listener = (_event, id, payload) => {
+      const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+      handler(id, bytes);
+    };
+    ipcRenderer.on("mixline:app-pcm", listener);
+    return () => ipcRenderer.removeListener("mixline:app-pcm", listener);
+  },
+  onAppCaptureEnded: (handler) => {
+    const listener = (_event, info) => handler(info);
+    ipcRenderer.on("mixline:app-capture-ended", listener);
+    return () => ipcRenderer.removeListener("mixline:app-capture-ended", listener);
+  },
+  getWindowMode: () => ipcRenderer.invoke("mixline:get-window-mode"),
+  setWindowMode: (mode) => ipcRenderer.invoke("mixline:set-window-mode", mode),
+  onWindowMode: (handler) => {
+    const listener = (_event, mode) => handler(mode);
+    ipcRenderer.on("mixline:window-mode", listener);
+    return () => ipcRenderer.removeListener("mixline:window-mode", listener);
+  },
   onHotkey: (handler) => {
     const listener = (_event, cueId) => handler(cueId);
     ipcRenderer.on("mixline:hotkey", listener);
