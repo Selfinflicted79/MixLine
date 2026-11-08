@@ -5,17 +5,30 @@ import {
   faderControl,
   knobChoices,
   knobControl,
+  MIDI_AUTO,
+  MIDI_SHARE,
   type MpdAssign,
+  type MpdStatus,
 } from "@/lib/mpd226";
 import type { ChannelSnapshot } from "@/lib/audio-engine";
 
 type MpdAssignPanelProps = {
   channels: ChannelSnapshot[];
   assign: MpdAssign;
+  midi: MpdStatus;
   onChange: (assign: MpdAssign) => void;
+  onDevice: (id: string) => void;
+  onRefresh: () => void;
 };
 
-export function MpdAssignPanel({ channels, assign, onChange }: MpdAssignPanelProps) {
+export function MpdAssignPanel({
+  channels,
+  assign,
+  midi,
+  onChange,
+  onDevice,
+  onRefresh,
+}: MpdAssignPanelProps) {
   const named = channels.map((channel) => ({
     id: channel.id,
     name: channel.name,
@@ -23,6 +36,12 @@ export function MpdAssignPanel({ channels, assign, onChange }: MpdAssignPanelPro
   }));
   const sliders = faderChoices(named);
   const knobs = knobChoices(named);
+  const deviceValue =
+    midi.preferred === MIDI_SHARE || midi.preferred === MIDI_AUTO
+      ? midi.preferred
+      : midi.devices.some((device) => device.id === midi.preferred)
+        ? midi.preferred
+        : MIDI_AUTO;
 
   function setFader(index: 0 | 1, value: string) {
     const next: MpdAssign["faders"] = [...assign.faders];
@@ -38,7 +57,36 @@ export function MpdAssignPanel({ channels, assign, onChange }: MpdAssignPanelPro
 
   return (
     <div className="absolute top-full right-0 z-30 mt-1 w-72 rounded-sm border border-black/60 bg-[#141824] p-2.5 shadow-[0_16px_40px_rgba(0,0,0,0.55)]">
-      <p className="text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
+          Controller
+        </p>
+        <button
+          type="button"
+          className="text-[9px] font-bold tracking-[0.12em] text-[color:var(--neon-cyan)] uppercase hover:underline"
+          onClick={onRefresh}
+        >
+          Rescan
+        </button>
+      </div>
+      <select
+        className="mt-1.5 h-8 w-full truncate rounded-sm border border-[color:var(--console-edge)] bg-[color:var(--chip)] px-1.5 text-[11px] text-[color:var(--console-ink)] outline-none"
+        value={deviceValue}
+        onChange={(event) => onDevice(event.target.value)}
+      >
+        <option value={MIDI_AUTO}>Auto (Share or first pad)</option>
+        <option value={MIDI_SHARE}>BPH Share (Stream Controller)</option>
+        {midi.devices.map((device) => (
+          <option key={device.id} value={device.id}>
+            {device.name}
+          </option>
+        ))}
+      </select>
+      <p className="mt-1 text-[9px] leading-snug text-[color:var(--console-muted)]">
+        Pick any MIDI pad. MPD226 maps still work. Use Learn on a cue for other controllers.
+      </p>
+
+      <p className="mt-3 text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
         Sliders
       </p>
       <div className="mt-1.5 grid grid-cols-[1.4rem_1fr] items-center gap-1.5">

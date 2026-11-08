@@ -15,9 +15,17 @@ type LiveEqProps = {
   bands: EqBand[];
   onChange: (bandId: string, patch: { gainDb?: number; frequency?: number }) => void;
   onReset: () => void;
+  trackLabel?: string;
+  trackLive?: boolean;
 };
 
-export function LiveEq({ bands, onChange, onReset }: LiveEqProps) {
+export function LiveEq({
+  bands,
+  onChange,
+  onReset,
+  trackLabel = "No track",
+  trackLive = false,
+}: LiveEqProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bandsRef = useRef(bands);
   const drag = useRef<string | null>(null);
@@ -84,9 +92,9 @@ export function LiveEq({ bands, onChange, onReset }: LiveEqProps) {
   }
 
   return (
-    <section className="flex h-full w-[24rem] shrink-0 flex-col gap-2 rounded-sm border border-black/50 bg-[linear-gradient(180deg,#1c2133,#12141e)] px-2 py-2">
-      <div className="flex items-center justify-between">
-        <div>
+    <section className="flex h-full w-full min-h-0 flex-col gap-2 rounded-sm border border-black/50 bg-[linear-gradient(180deg,#1c2133,#12141e)] px-2 py-2">
+      <div className="flex items-center gap-2">
+        <div className="shrink-0">
           <p className="font-[family-name:var(--font-rack)] text-sm tracking-[0.16em] text-[color:var(--console-ink)] uppercase">
             Live EQ
           </p>
@@ -94,9 +102,15 @@ export function LiveEq({ bands, onChange, onReset }: LiveEqProps) {
             Main mix
           </p>
         </div>
+        <div
+          className={`track-info-screen ${trackLive ? "track-info-screen--live" : ""}`}
+          title={trackLabel}
+        >
+          <span className="track-info-screen__label">{trackLabel}</span>
+        </div>
         <button
           type="button"
-          className="rounded-sm bg-[color:var(--chip)] px-2 py-1 text-[10px] font-bold tracking-wide text-[color:var(--console-ink)] uppercase"
+          className="shrink-0 rounded-sm bg-[color:var(--chip)] px-2 py-1 text-[10px] font-bold tracking-wide text-[color:var(--console-ink)] uppercase"
           onClick={onReset}
         >
           Flat

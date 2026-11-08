@@ -47,6 +47,9 @@ export type MixlineDesktopApi = {
   ) => Promise<{ ok: boolean; mode: "full" | "compact" }>;
   onWindowMode: (handler: (mode: "full" | "compact") => void) => () => void;
   onHotkey: (handler: (cueId: string) => void) => () => void;
+  onMediaKey: (
+    handler: (action: "play-pause" | "next" | "prev" | "mute") => void,
+  ) => () => void;
 };
 
 declare global {

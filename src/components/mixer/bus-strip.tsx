@@ -9,7 +9,7 @@ import { cn } from "cn";
 type BusStripProps = {
   title: string;
   subtitle: string;
-  accent: "cyan" | "orange" | "green";
+  accent: "cyan" | "orange" | "green" | "magenta";
   volume: number;
   muted: boolean;
   peak: number;
@@ -18,6 +18,12 @@ type BusStripProps = {
   eqMode: boolean;
   /** Main Mix uses the Live EQ panel instead of this button. */
   showEq?: boolean;
+  showMix?: boolean;
+  toMix?: boolean;
+  onToMix?: () => void;
+  showMonitor?: boolean;
+  monitor?: boolean;
+  onMonitor?: () => void;
   onVolume: (v: number) => void;
   onMute: () => void;
   onEnterEq: () => void;
@@ -37,6 +43,12 @@ export function BusStrip({
   eq,
   eqMode,
   showEq = true,
+  showMix = false,
+  toMix = true,
+  onToMix,
+  showMonitor = false,
+  monitor = false,
+  onMonitor,
   onVolume,
   onMute,
   onEnterEq,
@@ -45,7 +57,13 @@ export function BusStrip({
   onResetEq,
 }: BusStripProps) {
   const edge =
-    accent === "orange" ? "#e8a23a" : accent === "green" ? "#5fd36a" : "#3d9bcc";
+    accent === "orange"
+      ? "#e8a23a"
+      : accent === "green"
+        ? "#5fd36a"
+        : accent === "magenta"
+          ? "#ff4fd8"
+          : "#3d9bcc";
 
   return (
     <section
@@ -121,7 +139,12 @@ export function BusStrip({
             {formatDb(rms)} dB
           </div>
 
-          <div className={cn("grid gap-1", showEq ? "grid-cols-2" : "grid-cols-1")}>
+          <div
+            className={cn(
+              "grid gap-1",
+              showEq || showMix || showMonitor ? "grid-cols-2" : "grid-cols-1",
+            )}
+          >
             <button
               type="button"
               className={cn(
@@ -141,6 +164,34 @@ export function BusStrip({
                 onClick={onEnterEq}
               >
                 EQ
+              </button>
+            ) : null}
+            {showMix ? (
+              <button
+                type="button"
+                className={cn(
+                  "btn-lit h-8 text-[10px]",
+                  toMix
+                    ? "bg-[color:var(--neon-cyan)]/25 text-[color:var(--neon-cyan)]"
+                    : "bg-[color:var(--chip)] text-[color:var(--console-ink)] hover:bg-[color:var(--chip-hover)]",
+                )}
+                onClick={onToMix}
+              >
+                Mix
+              </button>
+            ) : null}
+            {showMonitor ? (
+              <button
+                type="button"
+                className={cn(
+                  "btn-lit h-8 text-[10px]",
+                  monitor
+                    ? "bg-[color:var(--accent-amber)]/25 text-[color:var(--accent-amber)]"
+                    : "bg-[color:var(--chip)] text-[color:var(--console-ink)] hover:bg-[color:var(--chip-hover)]",
+                )}
+                onClick={onMonitor}
+              >
+                Mon
               </button>
             ) : null}
           </div>

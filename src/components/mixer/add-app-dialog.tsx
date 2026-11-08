@@ -4,9 +4,6 @@ import { Button } from "@/components/ui/button";
 import type { AudioDevice } from "@/lib/audio-engine";
 import type { AudioAppInfo } from "@/vite-env";
 
-const SE_DEFAULT =
-  "https://widgets.streamelements.com/host/6822dbe37bfedb350e51364d/fa110403-33eb-43ef-85c3-10027daf8564/81HM6LGXo-6mHd4Xn-Y8LJ_OaTjBNKCkbeT4ZU2xJ7ujE0Nd";
-
 function isMicDevice(label: string) {
   return /microphone|headset|mic\b|webcam|camera/i.test(label);
 }
@@ -33,7 +30,6 @@ type AddAppDialogProps = {
   onPickLocalMusic: () => void;
   onConfirmCable: (name: string, deviceId: string) => void;
   onOpenWindowsSoundSettings?: () => void;
-  onOpenWidget?: (url: string, browser: "edge" | "chrome") => void;
 };
 
 export function AddAppDialog({
@@ -46,10 +42,8 @@ export function AddAppDialog({
   onPickLocalMusic,
   onConfirmCable,
   onOpenWindowsSoundSettings,
-  onOpenWidget,
 }: AddAppDialogProps) {
   const [query, setQuery] = useState("");
-  const [widgetUrl, setWidgetUrl] = useState(SE_DEFAULT);
   const [showCable, setShowCable] = useState(false);
 
   const visible = useMemo(() => {
@@ -157,41 +151,9 @@ export function AddAppDialog({
           )}
 
           <p className="text-xs text-[color:var(--console-muted)]">
-            YouTube Music and the AI widget share one fader if both are in Chrome. Open the widget in
-            Edge when YouTube is in Chrome and they show up separately.
+            Tip: put YouTube Music in a different browser than other Chrome tabs if you want separate
+            faders.
           </p>
-
-          <div className="space-y-2 rounded-md border border-white/10 bg-[color:var(--chip)] p-2">
-            <label className="block text-[11px] text-[color:var(--console-muted)]">
-              StreamElements AI widget
-              <input
-                type="url"
-                value={widgetUrl}
-                onChange={(e) => setWidgetUrl(e.target.value)}
-                className="mt-1 w-full rounded-sm border border-[color:var(--console-edge)] bg-[#12141c] px-2 py-1.5 text-xs text-[color:var(--console-ink)]"
-              />
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="border-[color:var(--console-edge)] bg-[#12141c] text-[color:var(--console-ink)]"
-                onClick={() => onOpenWidget?.(widgetUrl.trim() || SE_DEFAULT, "edge")}
-              >
-                Open in Edge
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="border-[color:var(--console-edge)] bg-[#12141c] text-[color:var(--console-ink)]"
-                onClick={() => onOpenWidget?.(widgetUrl.trim() || SE_DEFAULT, "chrome")}
-              >
-                Open in Chrome
-              </Button>
-            </div>
-          </div>
 
           <button
             type="button"

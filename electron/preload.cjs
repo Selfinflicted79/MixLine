@@ -41,4 +41,9 @@ contextBridge.exposeInMainWorld("mixlineDesktop", {
     ipcRenderer.on("mixline:hotkey", listener);
     return () => ipcRenderer.removeListener("mixline:hotkey", listener);
   },
+  onMediaKey: (handler) => {
+    const listener = (_event, action) => handler(action);
+    ipcRenderer.on("mixline:media-key", listener);
+    return () => ipcRenderer.removeListener("mixline:media-key", listener);
+  },
 });

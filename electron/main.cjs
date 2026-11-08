@@ -12,6 +12,7 @@ const {
 } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 
 const isDev = !app.isPackaged;
@@ -19,6 +20,10 @@ const DEV_URL = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:4317";
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
+/** @type {BrowserWindow | null} */
+let splashWindow = null;
+let splashFinished = false;
+let mainReady = false;
 /** @type {{ x: number, y: number, width: number, height: number } | null} */
 let fullBounds = null;
 /** @type {{ x: number, y: number, width: number, height: number } | null} */
@@ -213,6 +218,85 @@ function attachWindowPersistence(win) {
   });
 }
 
+function splashDir() {
+  if (app.isPackaged) return path.join(process.resourcesPath, "splash");
+  return path.join(__dirname, "splash");
+}
+
+function revealMainWindow() {
+  if (!mainReady || !splashFinished) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (windowMode === "compact") {
+    applyCompactLayout(mainWindow);
+  } else if (fullMaximized) {
+    mainWindow.maximize();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+  mainWindow.webContents.send("mixline:window-mode", windowMode);
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.close();
+  }
+  splashWindow = null;
+}
+
+function createSplashWindow() {
+  const icon = resolveAppIcon();
+  const dir = splashDir();
+  const htmlPath = path.join(dir, "index.html");
+  const videoPath = path.join(dir, "DevLoadingScreen.mp4");
+  const videoUrl = fs.existsSync(videoPath) ? pathToFileURL(videoPath).href : "";
+
+  splashWindow = new BrowserWindow({
+    width: 720,
+    height: 405,
+    resizable: false,
+    maximizable: false,
+    minimizable: true,
+    fullscreenable: false,
+    frame: false,
+    transparent: false,
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    backgroundColor: "#07080d",
+    show: true,
+    title: "MixLine",
+    ...(icon ? { icon } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, "splash-preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      webSecurity: false,
+    },
+  });
+
+  // Absolute file URL so the portable unpack path always finds the clip.
+  void splashWindow.loadFile(htmlPath, {
+    query: videoUrl ? { video: videoUrl } : {},
+  });
+  splashWindow.center();
+  splashWindow.on("closed", () => {
+    splashWindow = null;
+    // If the splash is closed early, still open the rack when ready.
+    splashFinished = true;
+    revealMainWindow();
+  });
+
+  // Failsafe: force-close a stuck splash so it never sits as a black box.
+  setTimeout(() => {
+    if (splashFinished) return;
+    splashFinished = true;
+    try {
+      if (splashWindow && !splashWindow.isDestroyed()) splashWindow.destroy();
+    } catch {
+      /* already gone */
+    }
+    splashWindow = null;
+    revealMainWindow();
+  }, 14000);
+}
+
 function createWindow() {
   const saved = readWindowState();
   if (saved) {
@@ -258,14 +342,8 @@ function createWindow() {
   attachWindowPersistence(mainWindow);
 
   mainWindow.once("ready-to-show", () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (windowMode === "compact") {
-      applyCompactLayout(mainWindow);
-    } else if (fullMaximized) {
-      mainWindow.maximize();
-    }
-    mainWindow.show();
-    mainWindow.webContents.send("mixline:window-mode", windowMode);
+    mainReady = true;
+    revealMainWindow();
   });
 
   mainWindow.on("closed", () => {
@@ -275,6 +353,28 @@ function createWindow() {
 
 function clearHotkeys() {
   globalShortcut.unregisterAll();
+}
+
+function sendMediaKey(action) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("mixline:media-key", action);
+  }
+}
+
+function registerMediaKeys() {
+  const bindings = [
+    ["MediaPlayPause", "play-pause"],
+    ["MediaNextTrack", "next"],
+    ["MediaPreviousTrack", "prev"],
+    ["VolumeMute", "mute"],
+  ];
+  for (const [accelerator, action] of bindings) {
+    try {
+      globalShortcut.register(accelerator, () => sendMediaKey(action));
+    } catch {
+      /* another app may already own the key */
+    }
+  }
 }
 
 function registerHotkeys(bindings) {
@@ -294,10 +394,18 @@ function registerHotkeys(bindings) {
       failed.push(binding.accelerator);
     }
   }
+  registerMediaKeys();
   return { ok: failed.length === 0, failed };
 }
 
 app.whenReady().then(() => {
+  ipcMain.on("mixline:splash-done", () => {
+    splashFinished = true;
+    revealMainWindow();
+  });
+
+  createSplashWindow();
+
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
     if (
       permission === "media" ||
@@ -447,7 +555,14 @@ app.whenReady().then(() => {
     });
     const start = result.indexOf("[");
     if (start < 0) return [];
-    return JSON.parse(result.slice(start));
+    const apps = JSON.parse(result.slice(start));
+    if (!Array.isArray(apps)) return [];
+    // Don't offer MixLine itself — capturing our output into a listen rack echoes.
+    return apps.filter((app) => {
+      const exe = String(app?.exe || "");
+      const name = String(app?.name || "");
+      return !/mixline/i.test(exe) && !/mixline/i.test(name);
+    });
   });
 
   ipcMain.handle("mixline:start-app-capture", async (_e, pid) => {
@@ -549,6 +664,7 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+  registerMediaKeys();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

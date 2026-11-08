@@ -17,8 +17,11 @@ import { ChannelStrip } from "@/components/mixer/channel-strip";
 import { DiscordRoute } from "@/components/mixer/discord-route";
 import { BusStrip } from "@/components/mixer/bus-strip";
 import { LiveEq } from "@/components/mixer/live-eq";
+import { MediaPlayer } from "@/components/mixer/media-player";
 import { MiniRack } from "@/components/mixer/mini-rack";
+import { RackTitle } from "@/components/mixer/rack-title";
 import { Soundboard } from "@/components/mixer/soundboard";
+import { checkMixLineUpdate } from "@/lib/update-check";
 import {
   audioEngine,
   type MixerSnapshot,
@@ -28,9 +31,13 @@ import { MpdAssignPanel } from "@/components/mixer/mpd-assign";
 import {
   faderControl,
   knobControl,
+  loadMidiDevice,
   loadMpdAssign,
+  mapNoteToPad,
+  saveMidiDevice,
   saveMpdAssign,
   startMpd226,
+  type MidiControllerSession,
   type MpdAssign,
   type MpdControl,
   type MpdStatus,
@@ -57,11 +64,27 @@ const emptySnap: MixerSnapshot = {
   cueMasterPeak: 0,
   cueMasterRms: 0,
   cueEq: cloneDefaultEq(),
+  playerVolume: 0.85,
+  playerMuted: false,
+  playerToMix: true,
+  playerMonitor: false,
+  playerPeak: 0,
+  playerRms: 0,
+  playerPlaying: false,
+  playerIndex: 0,
+  playerTracks: [],
+  channelRackName: "Stream",
+  cueRackName: "Main",
+  cueBanks: [{ id: "cue-bank-main", name: "Main" }],
+  lineBanks: [{ id: "line-bank-stream", name: "Stream" }],
+  activeCueBankId: "cue-bank-main",
+  activeLineBankId: "line-bank-stream",
   running: false,
   anySolo: false,
   monitorMix: false,
   monitorVolume: 0.55,
   discordDeviceId: "",
+  phonesDeviceId: "",
   outputDevices: [],
   inputDevices: [],
   cues: [],
@@ -84,13 +107,24 @@ export function MixerBoard() {
     "idle",
   );
   const [compact, setCompact] = useState(false);
-  const [mpd, setMpd] = useState<MpdStatus>({ connected: false, name: null });
+  const [mpd, setMpd] = useState<MpdStatus>({
+    connected: false,
+    name: null,
+    preferred: loadMidiDevice(),
+    devices: [],
+    shareAvailable: false,
+  });
   const [mpdAssign, setMpdAssign] = useState<MpdAssign>(() => loadMpdAssign());
   const [mpdMapOpen, setMpdMapOpen] = useState(false);
+  const [sidePanel, setSidePanel] = useState<"eq" | "player">("eq");
+  const [updateNote, setUpdateNote] = useState<string | null>(null);
   const [, startTransition] = useTransition();
   const fileRef = useRef<HTMLInputElement>(null);
   const lastSavedJson = useRef("");
   const bootedRef = useRef(false);
+  const midiSessionRef = useRef<MidiControllerSession | null>(null);
+  const learnCueRef = useRef<string | null>(null);
+  const [learnCueId, setLearnCueId] = useState<string | null>(null);
 
   useEffect(() => {
     setIsElectron(!!window.mixlineDesktop);
@@ -130,6 +164,41 @@ export function MixerBoard() {
       void audioEngine.playCue(cueId);
     });
   }, []);
+
+  useEffect(() => {
+    if (!window.mixlineDesktop?.onMediaKey) return;
+    return window.mixlineDesktop.onMediaKey((action) => {
+      if (action === "play-pause") audioEngine.togglePlayer();
+      else if (action === "next") audioEngine.nextPlayerTrack();
+      else if (action === "prev") audioEngine.prevPlayerTrack();
+      else if (action === "mute") audioEngine.togglePlayerMute();
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const track = snap.playerTracks[snap.playerIndex];
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: track?.name ?? "MixLine Player",
+      artist: "MixLine",
+      album: "Playlist",
+    });
+    navigator.mediaSession.playbackState = snap.playerPlaying ? "playing" : "paused";
+    navigator.mediaSession.setActionHandler("play", () => audioEngine.playPlayer());
+    navigator.mediaSession.setActionHandler("pause", () => audioEngine.pausePlayer());
+    navigator.mediaSession.setActionHandler("previoustrack", () =>
+      audioEngine.prevPlayerTrack(),
+    );
+    navigator.mediaSession.setActionHandler("nexttrack", () => audioEngine.nextPlayerTrack());
+    navigator.mediaSession.setActionHandler("stop", () => audioEngine.pausePlayer());
+    return () => {
+      navigator.mediaSession.setActionHandler("play", null);
+      navigator.mediaSession.setActionHandler("pause", null);
+      navigator.mediaSession.setActionHandler("previoustrack", null);
+      navigator.mediaSession.setActionHandler("nexttrack", null);
+      navigator.mediaSession.setActionHandler("stop", null);
+    };
+  }, [snap.playerIndex, snap.playerPlaying, snap.playerTracks]);
 
   // Autosave when the durable setup actually changes (not every meter tick).
   useEffect(() => {
@@ -195,13 +264,30 @@ export function MixerBoard() {
   }
 
   const midiRef = useRef({
-    pad: (_index: number) => {},
+    note: (_note: number) => {},
     fader: (_index: number, _value: number) => {},
     knob: (_index: number, _value: number) => {},
     sw: (_index: number) => {},
   });
   midiRef.current = {
-    pad: (index) => {
+    note: (note) => {
+      if (learnCueRef.current) {
+        const id = learnCueRef.current;
+        learnCueRef.current = null;
+        setLearnCueId(null);
+        audioEngine.setCueMidiNote(id, note);
+        const pad = mapNoteToPad(note);
+        if (pad !== null) audioEngine.setCuePad(id, pad);
+        return;
+      }
+      const learned = snap.cues.find((item) => item.midiNote === note);
+      if (learned) {
+        if (!bootedRef.current) void bootAndRestore();
+        void audioEngine.playCue(learned.id);
+        return;
+      }
+      const index = mapNoteToPad(note);
+      if (index === null) return;
       const cue = snap.cues.find((item) => item.pad === index);
       if (!cue) return;
       if (!bootedRef.current) void bootAndRestore();
@@ -213,13 +299,19 @@ export function MixerBoard() {
   };
 
   useEffect(() => {
-    return startMpd226({
+    const session = startMpd226({
+      preferred: loadMidiDevice(),
       onStatus: setMpd,
-      onPad: (index) => midiRef.current.pad(index),
+      onNote: (note) => midiRef.current.note(note),
       onFader: (index, value) => midiRef.current.fader(index, value),
       onKnob: (index, value) => midiRef.current.knob(index, value),
       onSwitch: (index) => midiRef.current.sw(index),
     });
+    midiSessionRef.current = session;
+    return () => {
+      midiSessionRef.current = null;
+      session.stop();
+    };
   }, []);
 
   async function runAction(label: string, action: () => Promise<unknown>) {
@@ -330,7 +422,8 @@ export function MixerBoard() {
         onSelectDiscord={(id) =>
           void runAction("sink", () => audioEngine.setDiscordOutputDevice(id))
         }
-        mpdShared={mpd.name === "BPH Share"}
+        mpdShared={mpd.connected}
+        midiLabel={mpd.name === "BPH Share" ? "BPH Share" : mpd.connected ? "MIDI" : null}
       />
     );
   }
@@ -428,6 +521,35 @@ export function MixerBoard() {
                     ? "Save failed"
                     : "Autosave ready"}
             </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-9 rounded-md border-white/10 bg-[color:var(--chip)] text-[color:var(--console-ink)]"
+              onClick={() =>
+                void (async () => {
+                  try {
+                    const result = await checkMixLineUpdate("0.2.29");
+                    if (!result.available) {
+                      setUpdateNote("You're on the latest MixLine.");
+                      return;
+                    }
+                    setUpdateNote(`Update ${result.tag} is ready.`);
+                    if (result.page) {
+                      window.open(result.page, "_blank", "noopener,noreferrer");
+                    }
+                  } catch {
+                    setUpdateNote("Could not check for updates.");
+                  }
+                })()
+              }
+            >
+              Updates
+            </Button>
+            {updateNote ? (
+              <span className="max-w-[12rem] truncate text-[10px] text-[color:var(--console-muted)]">
+                {updateNote}
+              </span>
+            ) : null}
             {!started ? (
               <Button
                 type="button"
@@ -450,8 +572,11 @@ export function MixerBoard() {
         <DiscordRoute
           snap={snap}
           onRefresh={() => void runAction("refresh", () => audioEngine.refreshOutputDevices())}
-          onSelectDevice={(id) =>
+          onSelectSend={(id) =>
             void runAction("sink", () => audioEngine.setDiscordOutputDevice(id))
+          }
+          onSelectPhones={(id) =>
+            void runAction("phones", () => audioEngine.setPhonesOutputDevice(id))
           }
           onToggleMonitorMix={() => audioEngine.setMonitorMix(!snap.monitorMix)}
           onMonitorVolume={(v) => startTransition(() => audioEngine.setMonitorVolume(v))}
@@ -459,8 +584,21 @@ export function MixerBoard() {
 
         <Soundboard
           cues={snap.cues}
+          rackName={snap.cueRackName}
+          started={started}
+          bankIndex={Math.max(
+            0,
+            snap.cueBanks.findIndex((b) => b.id === snap.activeCueBankId),
+          )}
+          bankCount={snap.cueBanks.length}
+          canAddBank={snap.cueBanks.length < 3}
+          onAddBank={() => audioEngine.addCueBank()}
+          onPrevBank={() => audioEngine.cycleCueBank(-1)}
+          onNextBank={() => audioEngine.cycleCueBank(1)}
+          onRenameRack={(name) => audioEngine.setCueRackName(name)}
           anySolo={snap.anySolo}
           onPlay={(id) => void runAction("cue", () => audioEngine.playCue(id))}
+          onKill={(id) => audioEngine.stopCue(id)}
           onVolume={(id, v) => startTransition(() => audioEngine.setCueVolume(id, v))}
           onMute={(id) => {
             const cue = snap.cues.find((c) => c.id === id);
@@ -489,7 +627,19 @@ export function MixerBoard() {
           }}
           onHotkey={(id, hotkey) => void handleHotkey(id, hotkey)}
           onReorder={(id, toIndex) => audioEngine.moveCue(id, toIndex)}
-          onPad={(id, pad) => audioEngine.setCuePad(id, pad)}
+          onPad={(id, pad) => {
+            audioEngine.setCueMidiNote(id, null);
+            audioEngine.setCuePad(id, pad);
+          }}
+          onLearnPad={(id) => {
+            learnCueRef.current = id;
+            setLearnCueId(id);
+          }}
+          learnCueId={learnCueId}
+          onCancelLearn={() => {
+            learnCueRef.current = null;
+            setLearnCueId(null);
+          }}
         />
 
         <section className="rack-panel relative flex min-h-0 flex-1 flex-col rounded-sm p-[var(--rack-pad)]">
@@ -503,17 +653,21 @@ export function MixerBoard() {
           </div>
           <div className="mb-[var(--rack-gap)] flex shrink-0 flex-col gap-2 border-b border-black/40 pb-[var(--rack-gap)] lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
-              <h2 className="font-[family-name:var(--font-rack)] text-[length:var(--rack-title)] tracking-[0.14em] text-[color:var(--console-ink)] uppercase">
-                Channel rack
-              </h2>
-              <p className="rack-help text-[length:var(--rack-copy)] text-[color:var(--console-muted)]">
-                <span className="font-semibold text-[color:var(--console-ink)]">App</span> taps one program
-                (YouTube, Cursor, Discord).{" "}
-                <span className="font-semibold text-[color:var(--console-ink)]">MIX</span> sends that strip to
-                your output.{" "}
-                <span className="font-semibold text-[color:var(--console-ink)]">System</span> is every sound on
-                the PC. Cue Send is the master for sound cues.
-              </p>
+              <RackTitle
+                prefix="Line Rack"
+                name={snap.channelRackName}
+                lit={started}
+                bankIndex={Math.max(
+                  0,
+                  snap.lineBanks.findIndex((b) => b.id === snap.activeLineBankId),
+                )}
+                bankCount={snap.lineBanks.length}
+                canAddBank={snap.lineBanks.length < 3}
+                onAddBank={() => audioEngine.addLineBank()}
+                onPrevBank={() => audioEngine.cycleLineBank(-1)}
+                onNextBank={() => audioEngine.cycleLineBank(1)}
+                onRename={(name) => audioEngine.setChannelRackName(name)}
+              />
             </div>
 
             <div className="relative flex flex-wrap items-center gap-1.5">
@@ -528,8 +682,10 @@ export function MixerBoard() {
                 )}
                 title={
                   mpd.name === "BPH Share"
-                    ? "Stream Controller has the MPD226 and is sharing every pad, slider, and knob with MixLine."
-                    : "Choose what the two free sliders and the four knobs control. Cue and Mix sliders stay put."
+                    ? "Stream Controller is sharing the controller with MixLine."
+                    : mpd.name
+                      ? `Linked to ${mpd.name}. Open to pick another controller or map sliders.`
+                      : "Scan and pick a MIDI controller. Map the free sliders and knobs."
                 }
                 onClick={() => setMpdMapOpen((open) => !open)}
               >
@@ -539,16 +695,28 @@ export function MixerBoard() {
                     mpd.connected ? "bg-[color:var(--meter-green)] shadow-[0_0_6px_var(--meter-green)]" : "bg-white/25",
                   )}
                 />
-                {mpd.connected ? (mpd.name === "BPH Share" ? "BPH Share" : "MPD226") : "MPD226 off"}
+                {mpd.connected
+                  ? mpd.name === "BPH Share"
+                    ? "BPH Share"
+                    : (mpd.name ?? "MIDI").length > 18
+                      ? `${(mpd.name ?? "MIDI").slice(0, 16)}…`
+                      : (mpd.name ?? "MIDI")
+                  : "MIDI off"}
               </button>
               {mpdMapOpen ? (
                 <MpdAssignPanel
                   channels={snap.channels}
                   assign={mpdAssign}
+                  midi={mpd}
                   onChange={(next) => {
                     setMpdAssign(next);
                     saveMpdAssign(next);
                   }}
+                  onDevice={(id) => {
+                    saveMidiDevice(id);
+                    midiSessionRef.current?.setPreferred(id);
+                  }}
+                  onRefresh={() => midiSessionRef.current?.refresh()}
                 />
               ) : null}
               <SourceButton
@@ -612,7 +780,10 @@ export function MixerBoard() {
           <div className="flex min-h-0 flex-1 gap-[var(--strip-gap)] overflow-hidden pb-1">
             <div className="flex min-w-0 shrink gap-[var(--strip-gap)] overflow-x-auto overflow-y-hidden">
             {snap.channels.length === 0 ? (
-              <EmptyRack onAddMic={() => void openMicPicker()} />
+              <EmptyRack
+                listenRack={snap.activeLineBankId !== snap.lineBanks[0]?.id}
+                onAddMic={() => void openMicPicker()}
+              />
             ) : (
               snap.channels.map((channel) => (
                 <ChannelStrip
@@ -630,7 +801,10 @@ export function MixerBoard() {
                   }
                   onMute={() => audioEngine.setMuted(channel.id, !channel.muted)}
                   onSolo={() => audioEngine.setSolo(channel.id, !channel.solo)}
-                  onToMix={() => audioEngine.setToMix(channel.id, !channel.toMix)}
+                  onToMix={() => {
+                    const warning = audioEngine.setToMix(channel.id, !channel.toMix);
+                    if (warning) setError(warning);
+                  }}
                   onMonitor={() =>
                     audioEngine.setChannelMonitor(channel.id, !channel.monitor)
                   }
@@ -652,6 +826,20 @@ export function MixerBoard() {
                               audioEngine.setAppDevice(channel.id, deviceId),
                             )
                         : undefined
+                  }
+                  onNoiseCancel={
+                    channel.kind === "mic"
+                      ? (enabled) =>
+                          void runAction("nc", () =>
+                            audioEngine.setMicNoiseCancel(channel.id, enabled),
+                          )
+                      : undefined
+                  }
+                  onNoiseGate={
+                    channel.kind === "mic"
+                      ? (amount) =>
+                          startTransition(() => audioEngine.setMicNoiseGate(channel.id, amount))
+                      : undefined
                   }
                   onEnterEq={() => {
                     setEqBus(null);
@@ -701,13 +889,41 @@ export function MixerBoard() {
               }
               onResetEq={() => audioEngine.resetBusEq("cue")}
             />
+            <BusStrip
+              title="Play"
+              subtitle="MIX stream · MON ears"
+              accent="magenta"
+              volume={snap.playerVolume}
+              muted={snap.playerMuted}
+              peak={snap.playerPeak}
+              rms={snap.playerRms}
+              eq={snap.masterEq}
+              eqMode={false}
+              showEq={false}
+              showMix
+              toMix={snap.playerToMix}
+              onToMix={() => audioEngine.setPlayerToMix(!snap.playerToMix)}
+              showMonitor
+              monitor={snap.playerMonitor}
+              onMonitor={() => audioEngine.setPlayerMonitor(!snap.playerMonitor)}
+              onVolume={(v) => startTransition(() => audioEngine.setPlayerVolume(v))}
+              onMute={() => audioEngine.setPlayerMuted(!snap.playerMuted)}
+              onEnterEq={() => undefined}
+              onExitEq={() => undefined}
+              onEqGain={() => undefined}
+              onResetEq={() => undefined}
+            />
             </div>
 
             <div className="min-w-4 flex-1" />
 
             <BusStrip
               title="Mix"
-              subtitle="Main mix"
+              subtitle={
+                snap.activeLineBankId === snap.lineBanks[0]?.id
+                  ? `${snap.channelRackName} send`
+                  : `${snap.channelRackName} · ears`
+              }
               accent="green"
               volume={snap.masterVolume}
               muted={snap.masterMuted}
@@ -724,13 +940,99 @@ export function MixerBoard() {
               onResetEq={() => audioEngine.resetBusEq("master")}
             />
 
-            <LiveEq
-              bands={snap.masterEq}
-              onChange={(bandId, patch) =>
-                startTransition(() => audioEngine.setBusEq("master", bandId, patch))
-              }
-              onReset={() => audioEngine.resetBusEq("master")}
-            />
+            <div className="flex h-full w-[24rem] shrink-0 flex-col gap-1.5">
+              <div className="flex shrink-0 gap-1">
+                <button
+                  type="button"
+                  className={cn(
+                    "h-7 flex-1 rounded-sm border text-[10px] font-bold tracking-[0.14em] uppercase",
+                    sidePanel === "eq"
+                      ? "border-[color:var(--neon-cyan)]/50 bg-[color:var(--neon-cyan)]/15 text-[color:var(--neon-cyan)]"
+                      : "border-white/10 text-[color:var(--console-muted)] hover:bg-white/5",
+                  )}
+                  onClick={() => setSidePanel("eq")}
+                >
+                  Live EQ
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "h-7 flex-1 rounded-sm border text-[10px] font-bold tracking-[0.14em] uppercase",
+                    sidePanel === "player"
+                      ? "border-[color:var(--neon-magenta)]/50 bg-[color:var(--neon-magenta)]/15 text-[color:var(--neon-magenta)]"
+                      : "border-white/10 text-[color:var(--console-muted)] hover:bg-white/5",
+                  )}
+                  onClick={() => setSidePanel("player")}
+                >
+                  Player
+                </button>
+              </div>
+              <div className="min-h-0 flex-1">
+                {sidePanel === "eq" ? (
+                  <LiveEq
+                    bands={snap.masterEq}
+                    trackLabel={
+                      snap.playerTracks[snap.playerIndex]
+                        ? `${snap.playerPlaying ? "▶" : "❚❚"} ${snap.playerTracks[snap.playerIndex]!.name}`
+                        : "No track"
+                    }
+                    trackLive={snap.playerPlaying}
+                    onChange={(bandId, patch) =>
+                      startTransition(() => audioEngine.setBusEq("master", bandId, patch))
+                    }
+                    onReset={() => audioEngine.resetBusEq("master")}
+                  />
+                ) : (
+                  <MediaPlayer
+                    tracks={snap.playerTracks}
+                    index={snap.playerIndex}
+                    playing={snap.playerPlaying}
+                    onAdd={(files) =>
+                      void runAction("player", async () => {
+                        let added = 0;
+                        const failed: string[] = [];
+                        for (const file of files) {
+                          try {
+                            const id = await audioEngine.addPlayerTrack(file);
+                            added += 1;
+                            try {
+                              await persistCueFile(id, file);
+                            } catch {
+                              /* keep the track in-session even if disk save fails */
+                            }
+                          } catch {
+                            failed.push(file.name);
+                          }
+                        }
+                        if (!added && failed.length) {
+                          throw new Error(
+                            `Could not decode: ${failed.slice(0, 3).join(", ")}`,
+                          );
+                        }
+                        if (failed.length) {
+                          setError(
+                            `Added ${added}, skipped ${failed.length} file(s).`,
+                          );
+                        }
+                      })
+                    }
+                    onRemove={(id) => {
+                      const track = snap.playerTracks.find((t) => t.id === id);
+                      audioEngine.removePlayerTrack(id);
+                      const fileId = track?.fileId ?? id;
+                      if (window.mixlineDesktop) {
+                        void window.mixlineDesktop.deleteCueFile(fileId);
+                      }
+                    }}
+                    onReorder={(id, toIndex) => audioEngine.movePlayerTrack(id, toIndex)}
+                    onPlay={(index) => audioEngine.playPlayer(index)}
+                    onPause={() => audioEngine.pausePlayer()}
+                    onNext={() => audioEngine.nextPlayerTrack()}
+                    onPrev={() => audioEngine.prevPlayerTrack()}
+                  />
+                )}
+              </div>
+            </div>
           </div>
         </section>
       </main>
@@ -747,11 +1049,6 @@ export function MixerBoard() {
           onOpenWindowsSoundSettings={
             window.mixlineDesktop
               ? () => void window.mixlineDesktop?.openSoundSettings()
-              : undefined
-          }
-          onOpenWidget={
-            window.mixlineDesktop
-              ? (url, browser) => void window.mixlineDesktop?.openWidgetUrl(url, browser)
               : undefined
           }
           onPickLocalMusic={pickLocalMusic}
@@ -885,14 +1182,22 @@ function SourceButton({
   );
 }
 
-function EmptyRack({ onAddMic }: { onAddMic: () => void }) {
+function EmptyRack({
+  onAddMic,
+  listenRack = false,
+}: {
+  onAddMic: () => void;
+  listenRack?: boolean;
+}) {
   return (
     <div className="flex min-h-72 min-w-[16rem] flex-1 flex-col items-start justify-center gap-3 rounded-md border border-dashed border-[color:var(--console-edge)] bg-[color:var(--chip)]/60 px-5 py-6">
       <p className="font-[family-name:var(--font-rack)] text-lg tracking-[0.1em] text-[color:var(--console-ink)] uppercase">
         Empty rack
       </p>
       <p className="max-w-sm text-sm text-[color:var(--console-muted)]">
-        Add your mic first so voice and stream cues share the same mix Discord will hear.
+        {listenRack
+          ? "PC / listen rack: set Mix send AND Phones to your headset. Mix is MixLine’s ear volume (Player/Cue MON + apps on this rack) — like turning your headset down, but only for MixLine, not every Windows app. Use Player MON for music; System capture will echo."
+          : "Add a mic, app, or file for this rack. Route Mix send to wherever this bank should play — cable, headphones, TV, monitors, VR, and so on."}
       </p>
       <Button
         type="button"

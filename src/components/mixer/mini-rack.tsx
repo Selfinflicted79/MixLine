@@ -20,6 +20,7 @@ type MiniRackProps = {
   onToggleCueMasterMute: () => void;
   onSelectDiscord: (id: string) => void;
   mpdShared?: boolean;
+  midiLabel?: string | null;
 };
 
 /** Pocket mixer: same Mic / Music / Cue / Mix rack, tiny faders — corner size. */
@@ -37,6 +38,7 @@ export function MiniRack({
   onToggleCueMasterMute,
   onSelectDiscord,
   mpdShared = false,
+  midiLabel = null,
 }: MiniRackProps) {
   const mic = snap.channels.find((c) => c.kind === "mic");
   const music = snap.channels.find((c) => c.kind === "app" || c.kind === "file");
@@ -59,12 +61,12 @@ export function MiniRack({
           </p>
           <p className="brand-wordmark brand-wordmark--on text-base leading-none">MixLine</p>
         </div>
-        {mpdShared ? (
+        {mpdShared && midiLabel ? (
           <span
             className="shrink-0 text-[0.45rem] font-bold tracking-[0.12em] text-[color:var(--meter-green)] uppercase"
-            title="Stream Controller is sharing the MPD226"
+            title={midiLabel}
           >
-            BPH
+            {midiLabel === "BPH Share" ? "BPH" : "MIDI"}
           </span>
         ) : null}
         <Button

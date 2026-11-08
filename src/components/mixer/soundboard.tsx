@@ -4,14 +4,25 @@ import { GripVertical, Keyboard, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { LevelMeter } from "@/components/mixer/level-meter";
 import { VerticalFader } from "@/components/mixer/vertical-fader";
+import { RackTitle } from "@/components/mixer/rack-title";
 import { formatDb, type CuePad } from "@/lib/audio-engine";
 import { eventToAccelerator } from "@/lib/setup-store";
 import { cn } from "cn";
 
 type SoundboardProps = {
   cues: CuePad[];
+  rackName: string;
+  started?: boolean;
+  bankIndex?: number;
+  bankCount?: number;
+  canAddBank?: boolean;
+  onAddBank?: () => void;
+  onPrevBank?: () => void;
+  onNextBank?: () => void;
+  onRenameRack: (name: string) => void;
   anySolo: boolean;
   onPlay: (id: string) => void;
+  onKill: (id: string) => void;
   onVolume: (id: string, v: number) => void;
   onMute: (id: string) => void;
   onSolo: (id: string) => void;
@@ -22,12 +33,25 @@ type SoundboardProps = {
   onHotkey: (id: string, hotkey: string | null) => void;
   onReorder: (id: string, toIndex: number) => void;
   onPad: (id: string, pad: number | null) => void;
+  onLearnPad: (id: string) => void;
+  learnCueId: string | null;
+  onCancelLearn: () => void;
 };
 
 export function Soundboard({
   cues,
+  rackName,
+  started = false,
+  bankIndex = 0,
+  bankCount = 1,
+  canAddBank = false,
+  onAddBank,
+  onPrevBank,
+  onNextBank,
+  onRenameRack,
   anySolo,
   onPlay,
+  onKill,
   onVolume,
   onMute,
   onSolo,
@@ -38,6 +62,9 @@ export function Soundboard({
   onHotkey,
   onReorder,
   onPad,
+  onLearnPad,
+  learnCueId,
+  onCancelLearn,
 }: SoundboardProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);
@@ -132,12 +159,21 @@ export function Soundboard({
 
       <div className="mb-[var(--rack-gap)] flex shrink-0 flex-col gap-2 border-b border-black/40 pb-[var(--rack-gap)] sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0">
-          <h2 className="font-[family-name:var(--font-rack)] text-[length:var(--rack-title)] tracking-[0.14em] text-[color:var(--console-ink)] uppercase">
-            Cue rack
-          </h2>
+          <RackTitle
+            prefix="Cue Rack"
+            name={rackName}
+            lit={started}
+            bankIndex={bankIndex}
+            bankCount={bankCount}
+            canAddBank={canAddBank}
+            onAddBank={onAddBank}
+            onPrevBank={onPrevBank}
+            onNextBank={onNextBank}
+            onRename={onRenameRack}
+          />
           <p className="rack-help mt-1 max-w-4xl text-[length:var(--rack-copy)] text-[color:var(--console-muted)]">
-            Same strip controls as your inputs — gain, mute, solo, mix, and mon. Tap the big pad to fire.
-            Right-click a cue to put it on an MPD226 pad. Drag the corner grip to reorder.
+            Up to 12 strips in view — gain, mute, solo, mix, and mon. Tap to fire (stacks). Double-click the
+            fader to kill that cue’s plays. Right-click to Learn a MIDI pad. Drag the corner grip to reorder.
           </p>
         </div>
         <Button
@@ -167,10 +203,22 @@ export function Soundboard({
           Listening for a hotkey… Esc cancel, Delete clear.
         </div>
       ) : null}
+      {learnCueId ? (
+        <div className="mb-3 flex items-center justify-between gap-2 rounded-sm border border-[color:var(--neon-cyan)] bg-[color:var(--neon-cyan)]/15 px-3 py-2 text-sm text-[color:var(--console-ink)]">
+          <span>Hit a pad on your controller to link this cue…</span>
+          <button
+            type="button"
+            className="text-[11px] font-bold tracking-wide text-[color:var(--neon-cyan)] uppercase"
+            onClick={onCancelLearn}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : null}
 
       <div
         ref={rowRef}
-        className="relative flex gap-[var(--strip-gap)] overflow-x-auto overflow-y-hidden pb-1"
+        className="relative grid grid-cols-6 gap-[var(--strip-gap)] overflow-x-auto overflow-y-hidden pb-1 xl:grid-cols-12"
       >
         {lineLeft !== null ? (
           <div
@@ -185,7 +233,7 @@ export function Soundboard({
               key={cue.id}
               data-cue-card
               className={cn(
-                "strip-face relative flex w-[var(--strip-w)] shrink-0 flex-col gap-1.5 rounded-sm px-1.5 py-2",
+                "strip-face relative flex min-w-[6.4rem] flex-col gap-1.5 rounded-sm px-1.5 py-2",
                 dimmed && dragId !== cue.id && "opacity-45",
                 dragId === cue.id && "opacity-60",
               )}
@@ -242,7 +290,11 @@ export function Soundboard({
                     {cue.name}
                   </div>
                   <div className="truncate text-[9px] tracking-wide text-[#c4b59a] uppercase">
-                    {cue.pad === null ? "No pad" : `Pad ${cue.pad + 1}`}
+                    {cue.midiNote !== null
+                      ? `Note ${cue.midiNote}`
+                      : cue.pad === null
+                        ? "No pad"
+                        : `Pad ${cue.pad + 1}`}
                     {cue.hotkey ? ` · ${cue.hotkey}` : ""}
                   </div>
                 </button>
@@ -272,13 +324,14 @@ export function Soundboard({
                 <LevelMeter
                   rms={cue.rms}
                   peak={cue.peak}
-                  className="h-[8rem]"
+                  className="h-[8.4rem]"
                 />
                 <VerticalFader
                   value={cue.volume}
                   onChange={(v) => onVolume(cue.id, v)}
+                  onDoubleClick={() => onKill(cue.id)}
                   label={`${cue.name} volume`}
-                  className="h-[8rem]"
+                  className="h-[8.4rem]"
                   accent="orange"
                 />
               </div>
@@ -317,6 +370,10 @@ export function Soundboard({
                 onPad(menu.id, pad);
                 setMenu(null);
               }}
+              onLearn={() => {
+                onLearnPad(menu.id);
+                setMenu(null);
+              }}
             />,
             document.body,
           )
@@ -339,6 +396,7 @@ function PadMenu({
   x,
   y,
   onPick,
+  onLearn,
 }: {
   menuRef: RefObject<HTMLDivElement | null>;
   cues: CuePad[];
@@ -346,10 +404,11 @@ function PadMenu({
   x: number;
   y: number;
   onPick: (pad: number | null) => void;
+  onLearn: () => void;
 }) {
   const cue = cues.find((item) => item.id === cueId);
   const left = Math.max(8, Math.min(x, window.innerWidth - 228));
-  const top = Math.max(8, Math.min(y, window.innerHeight - 248));
+  const top = Math.max(8, Math.min(y, window.innerHeight - 280));
   return (
     <div
       ref={menuRef}
@@ -358,13 +417,20 @@ function PadMenu({
       onContextMenu={(event) => event.preventDefault()}
     >
       <p className="mb-1 truncate text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
-        {cue?.name ?? "Cue"} · MPD pad
+        {cue?.name ?? "Cue"} · pad
       </p>
+      <button
+        type="button"
+        className="mb-1.5 h-7 w-full rounded-sm border border-[color:var(--neon-cyan)]/50 text-[10px] font-bold tracking-wide text-[color:var(--neon-cyan)] uppercase hover:bg-[color:var(--neon-cyan)]/10"
+        onClick={onLearn}
+      >
+        Learn from controller
+      </button>
       <button
         type="button"
         className={cn(
           "mb-2 h-7 w-full rounded-sm border text-[10px] font-bold tracking-wide uppercase",
-          cue?.pad === null
+          cue?.pad === null && cue?.midiNote === null
             ? "border-[color:var(--neon-cyan)] text-[color:var(--neon-cyan)]"
             : "border-white/10 text-[color:var(--console-ink)] hover:bg-white/5",
         )}
@@ -398,7 +464,7 @@ function PadMenu({
         })}
       </div>
       <p className="mt-2 text-[9px] leading-tight text-[color:var(--console-muted)]">
-        Same layout as the controller. Pad 1 is the bottom left.
+        Grid matches MPD226 (pad 1 bottom left). Learn works on any MIDI pad.
       </p>
     </div>
   );

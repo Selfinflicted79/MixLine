@@ -22,6 +22,7 @@ export type ChannelSnapshot = {
   solo: boolean;
   toMix: boolean;
   monitor: boolean;
+  bankId: string;
   connected: boolean;
   peak: number;
   rms: number;
@@ -33,6 +34,10 @@ export type ChannelSnapshot = {
   fx: ChannelFx;
   /** Input trim in dB, 0..24. Raises a quiet source before the fader. */
   boostDb: number;
+  /** Mic: OS noise suppression / echo cancel on the capture device. */
+  noiseCancel: boolean;
+  /** Mic: 0 = off, 1 = tight gate against room / TV bleed. */
+  noiseGate: number;
 };
 
 export type AudioDevice = {
@@ -41,6 +46,18 @@ export type AudioDevice = {
 };
 
 export type OutputDevice = AudioDevice;
+
+export type RackBank = {
+  id: string;
+  name: string;
+  /** Line banks only — where this rack’s mix plays (cable, headphones, TV, etc.). */
+  mixDeviceId?: string;
+  /** Bank master — Stream send level, or PC/headset level for listen racks. */
+  volume?: number;
+  muted?: boolean;
+};
+
+export const MAX_RACK_BANKS = 3;
 
 export type CuePad = {
   id: string;
@@ -54,10 +71,19 @@ export type CuePad = {
   solo: boolean;
   toMix: boolean;
   monitor: boolean;
-  /** MPD226 pad 0–15. Null until the cue is assigned. */
+  bankId: string;
+  /** Logical pad slot 0–15 (MPD-style grid). Null until assigned. */
   pad: number | null;
+  /** Exact MIDI note that fires this cue (any controller). Null until learned or set. */
+  midiNote: number | null;
   peak: number;
   rms: number;
+};
+
+export type PlayerTrack = {
+  id: string;
+  name: string;
+  fileId?: string;
 };
 
 export type MixerSnapshot = {
@@ -72,12 +98,29 @@ export type MixerSnapshot = {
   cueMasterPeak: number;
   cueMasterRms: number;
   cueEq: EqBand[];
+  playerVolume: number;
+  playerMuted: boolean;
+  playerToMix: boolean;
+  playerMonitor: boolean;
+  playerPeak: number;
+  playerRms: number;
+  playerPlaying: boolean;
+  playerIndex: number;
+  playerTracks: PlayerTrack[];
+  channelRackName: string;
+  cueRackName: string;
+  cueBanks: RackBank[];
+  lineBanks: RackBank[];
+  activeCueBankId: string;
+  activeLineBankId: string;
   running: boolean;
   anySolo: boolean;
   /** Listen to the Discord mix in headphones. */
   monitorMix: boolean;
   monitorVolume: number;
   discordDeviceId: string;
+  /** Local PC / phones / TV listen destination. */
+  phonesDeviceId: string;
   outputDevices: OutputDevice[];
   inputDevices: AudioDevice[];
   cues: CuePad[];
@@ -92,6 +135,7 @@ type ChannelNodes = {
   solo: boolean;
   toMix: boolean;
   monitor: boolean;
+  bankId: string;
   connected: boolean;
   deviceId: string;
   deviceLabel: string;
@@ -113,12 +157,28 @@ type ChannelNodes = {
   analyser: AnalyserNode;
   gate: GainNode;
   monGate: GainNode;
+  noiseCancel: boolean;
+  noiseGate: number;
+  noiseGateGain: GainNode | null;
+  noiseSense: AnalyserNode | null;
+  noiseSenseData: Float32Array | null;
   fileElement: HTMLAudioElement | null;
   toneOsc: OscillatorNode | null;
   toneGain: GainNode | null;
   peak: number;
   rms: number;
   timeData: Float32Array;
+};
+
+type LineBankOutput = {
+  bus: GainNode;
+  gain: GainNode;
+  analyser: AnalyserNode;
+  dest: MediaStreamAudioDestinationNode;
+  audio: HTMLAudioElement;
+  timeData: Float32Array;
+  peak: number;
+  rms: number;
 };
 
 type CueNodes = {
@@ -128,13 +188,16 @@ type CueNodes = {
   buffer: AudioBuffer;
   hotkey: string | null;
   fileId?: string;
-  /** MPD226 pad 0–15, or null when this cue is not on a pad. */
+  /** Logical pad slot 0–15 (MPD-style grid), or null. */
   pad: number | null;
+  /** Exact MIDI note for any controller. Null until learned. */
+  midiNote: number | null;
   volume: number;
   muted: boolean;
   solo: boolean;
   toMix: boolean;
   monitor: boolean;
+  bankId: string;
   inputGain: GainNode | null;
   analyser: AnalyserNode | null;
   gate: GainNode | null;
@@ -145,18 +208,31 @@ type CueNodes = {
 };
 
 export type SavedSetup = {
-  version: 1 | 2 | 3 | 4;
+  version: 1 | 2 | 3 | 4 | 5 | 6;
   masterVolume: number;
   masterMuted: boolean;
   masterEq?: EqBand[];
   cueMasterVolume?: number;
   cueMasterMuted?: boolean;
   cueEq?: EqBand[];
+  playerVolume?: number;
+  playerMuted?: boolean;
+  playerToMix?: boolean;
+  playerMonitor?: boolean;
+  playerIndex?: number;
+  playerTracks?: Array<{ id: string; name: string; fileId?: string }>;
+  channelRackName?: string;
+  cueRackName?: string;
+  cueBanks?: RackBank[];
+  lineBanks?: RackBank[];
+  activeCueBankId?: string;
+  activeLineBankId?: string;
   monitorEnabled?: boolean;
   monitorMix?: boolean;
   monitorVolume: number;
   cueVolume?: number;
   discordDeviceId: string;
+  phonesDeviceId?: string;
   channels: Array<{
     kind: ChannelKind;
     name: string;
@@ -165,12 +241,15 @@ export type SavedSetup = {
     solo: boolean;
     toMix: boolean;
     monitor?: boolean;
+    bankId?: string;
     deviceId: string;
     deviceLabel?: string;
     captureMode?: CaptureMode;
     eq: EqBand[];
     fx?: ChannelFx;
     boostDb?: number;
+    noiseCancel?: boolean;
+    noiseGate?: number;
   }>;
   cues: Array<{
     id: string;
@@ -179,13 +258,31 @@ export type SavedSetup = {
     hotkey: string | null;
     fileId?: string;
     pad?: number | null;
+    midiNote?: number | null;
     volume?: number;
     muted?: boolean;
     solo?: boolean;
     toMix?: boolean;
     monitor?: boolean;
+    bankId?: string;
   }>;
 };
+
+function defaultCueBanks(): RackBank[] {
+  return [{ id: "cue-bank-main", name: "Main" }];
+}
+
+function defaultLineBanks(): RackBank[] {
+  return [
+    {
+      id: "line-bank-stream",
+      name: "Stream",
+      mixDeviceId: "",
+      volume: 0.85,
+      muted: false,
+    },
+  ];
+}
 
 function uid(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 9)}`;
@@ -293,15 +390,40 @@ export class AudioEngine {
   private discordGain: GainNode | null = null;
   private mixDestination: MediaStreamAudioDestinationNode | null = null;
   private discordAudio: HTMLAudioElement | null = null;
+  private phonesDestination: MediaStreamAudioDestinationNode | null = null;
+  private phonesAudio: HTMLAudioElement | null = null;
+  private playerGain: GainNode | null = null;
+  private playerAnalyser: AnalyserNode | null = null;
+  private playerMixGate: GainNode | null = null;
+  private playerMonGate: GainNode | null = null;
+  private playerTimeData: Float32Array | null = null;
+  private playerSource: AudioBufferSourceNode | null = null;
   private channels = new Map<string, ChannelNodes>();
   private cues = new Map<string, CueNodes>();
+  /** Live one-shots per cue — overlapping plays stack until stopCue. */
+  private cueVoices = new Map<string, Set<AudioBufferSourceNode>>();
+  private lineBankOutputs = new Map<string, LineBankOutput>();
+  private playerTracks: Array<PlayerTrack & { buffer: AudioBuffer }> = [];
   private masterVolume = 0.85;
   private masterMuted = false;
   private cueMasterVolume = 0.9;
   private cueMasterMuted = false;
+  private playerVolume = 0.85;
+  private playerMuted = false;
+  private playerToMix = true;
+  private playerMonitor = false;
+  private playerPlaying = false;
+  private playerIndex = 0;
+  private cueBanks: RackBank[] = defaultCueBanks();
+  private lineBanks: RackBank[] = defaultLineBanks();
+  private activeCueBankId = this.cueBanks[0]!.id;
+  private activeLineBankId = this.lineBanks[0]!.id;
+  private channelRackName = this.lineBanks[0]!.name;
+  private cueRackName = this.cueBanks[0]!.name;
   private monitorMix = false;
   private monitorVolume = 0.55;
   private discordDeviceId = "";
+  private phonesDeviceId = "";
   private outputDevices: OutputDevice[] = [];
   private inputDevices: AudioDevice[] = [];
   private masterPeak = 0;
@@ -312,6 +434,8 @@ export class AudioEngine {
   private cueMasterPeak = 0;
   private cueMasterRms = 0;
   private cueMasterTimeData: Float32Array | null = null;
+  private playerPeak = 0;
+  private playerRms = 0;
   private raf = 0;
   private listeners = new Set<(snap: MixerSnapshot) => void>();
   private peakHoldDecay = 0.96;
@@ -338,7 +462,9 @@ export class AudioEngine {
       [...this.channels.values()].some((c) => c.solo) ||
       [...this.cues.values()].some((c) => c.solo);
     return {
-      channels: [...this.channels.values()].map((c) => ({
+      channels: [...this.channels.values()]
+        .filter((c) => c.bankId === this.activeLineBankId)
+        .map((c) => ({
         id: c.id,
         name: c.name,
         kind: c.kind,
@@ -347,6 +473,7 @@ export class AudioEngine {
         solo: c.solo,
         toMix: c.toMix,
         monitor: c.monitor,
+        bankId: c.bankId,
         connected: c.connected,
         peak: c.peak,
         rms: c.rms,
@@ -357,36 +484,64 @@ export class AudioEngine {
         eq: c.eqBands.map((b) => ({ ...b })),
         fx: { ...c.fx },
         boostDb: c.boostDb,
+        noiseCancel: c.noiseCancel,
+        noiseGate: c.noiseGate,
       })),
-      masterVolume: this.masterVolume,
-      masterMuted: this.masterMuted,
-      masterPeak: this.masterPeak,
-      masterRms: this.masterRms,
+      masterVolume: this.getActiveLineBank()?.volume ?? this.masterVolume,
+      masterMuted: this.getActiveLineBank()?.muted ?? this.masterMuted,
+      masterPeak: this.activeMasterPeak(),
+      masterRms: this.activeMasterRms(),
       masterEq: this.masterEqBands.map((b) => ({ ...b })),
       cueMasterVolume: this.cueMasterVolume,
       cueMasterMuted: this.cueMasterMuted,
       cueMasterPeak: this.cueMasterPeak,
       cueMasterRms: this.cueMasterRms,
       cueEq: this.cueEqBands.map((b) => ({ ...b })),
+      playerVolume: this.playerVolume,
+      playerMuted: this.playerMuted,
+      playerToMix: this.playerToMix,
+      playerMonitor: this.playerMonitor,
+      playerPeak: this.playerPeak,
+      playerRms: this.playerRms,
+      playerPlaying: this.playerPlaying,
+      playerIndex: this.playerIndex,
+      playerTracks: this.playerTracks.map((track) => ({
+        id: track.id,
+        name: track.name,
+        fileId: track.fileId,
+      })),
+      channelRackName: this.channelRackName,
+      cueRackName: this.cueRackName,
+      cueBanks: this.cueBanks.map((b) => ({ ...b })),
+      lineBanks: this.lineBanks.map((b) => ({ ...b })),
+      activeCueBankId: this.activeCueBankId,
+      activeLineBankId: this.activeLineBankId,
       running: !!this.ctx && this.ctx.state === "running",
       anySolo,
       monitorMix: this.monitorMix,
       monitorVolume: this.monitorVolume,
-      discordDeviceId: this.discordDeviceId,
+      discordDeviceId:
+        this.lineBanks.find((b) => b.id === this.activeLineBankId)?.mixDeviceId ??
+        this.discordDeviceId,
+      phonesDeviceId: this.phonesDeviceId,
       outputDevices: this.outputDevices,
       inputDevices: this.inputDevices,
-      cues: [...this.cues.values()].map((c) => ({
+      cues: [...this.cues.values()]
+        .filter((c) => c.bankId === this.activeCueBankId)
+        .map((c) => ({
         id: c.id,
         name: c.name,
         builtin: c.builtin,
         hotkey: c.hotkey,
         fileId: c.fileId,
         pad: c.pad,
+        midiNote: c.midiNote,
         volume: c.volume,
         muted: c.muted,
         solo: c.solo,
         toMix: c.toMix,
         monitor: c.monitor,
+        bankId: c.bankId,
         peak: c.peak,
         rms: c.rms,
       })),
@@ -436,6 +591,22 @@ export class AudioEngine {
       this.discordGain = this.ctx.createGain();
       this.discordGain.gain.value = 1;
       this.mixDestination = this.ctx.createMediaStreamDestination();
+      this.phonesDestination = this.ctx.createMediaStreamDestination();
+      this.playerGain = this.ctx.createGain();
+      this.playerGain.gain.value = this.playerMuted ? 0 : this.playerVolume;
+      this.playerAnalyser = this.ctx.createAnalyser();
+      this.playerAnalyser.fftSize = 2048;
+      this.playerAnalyser.smoothingTimeConstant = 0.35;
+      this.playerTimeData = new Float32Array(this.playerAnalyser.fftSize);
+      this.playerMixGate = this.ctx.createGain();
+      this.playerMixGate.gain.value = this.playerToMix ? 1 : 0;
+      this.playerMonGate = this.ctx.createGain();
+      this.playerMonGate.gain.value = this.playerMonitor ? 1 : 0;
+      this.playerGain.connect(this.playerAnalyser);
+      this.playerAnalyser.connect(this.playerMixGate);
+      this.playerAnalyser.connect(this.playerMonGate);
+      this.playerMixGate.connect(this.mixBus);
+      this.playerMonGate.connect(this.monitorBus);
 
       // Cue rack → cue EQ → cue master send → main mix bus
       const cueEqIn = this.cueEqFilters[0];
@@ -465,13 +636,20 @@ export class AudioEngine {
       this.masterGain.connect(this.mixToMonitor);
       this.mixToMonitor.connect(this.monitorBus);
       this.monitorBus.connect(this.monitorGain);
-      this.monitorGain.connect(this.ctx.destination);
+      this.monitorGain.connect(this.phonesDestination);
 
       this.discordAudio = new Audio();
       this.discordAudio.autoplay = true;
       this.discordAudio.srcObject = this.mixDestination.stream;
       void this.discordAudio.play().catch(() => {
         /* autoplay may wait for gesture; start() is already user-driven */
+      });
+
+      this.phonesAudio = new Audio();
+      this.phonesAudio.autoplay = true;
+      this.phonesAudio.srcObject = this.phonesDestination.stream;
+      void this.phonesAudio.play().catch(() => {
+        /* gesture / power-on */
       });
 
       this.seedBuiltinCues();
@@ -524,11 +702,13 @@ export class AudioEngine {
       hotkey: opts?.hotkey ?? null,
       fileId: opts?.fileId,
       pad: opts?.pad ?? null,
+      midiNote: opts?.midiNote ?? null,
       volume: opts?.volume ?? 0.85,
       muted: opts?.muted ?? false,
       solo: opts?.solo ?? false,
       toMix: opts?.toMix ?? true,
       monitor: opts?.monitor ?? false,
+      bankId: opts?.bankId ?? this.activeCueBankId,
       inputGain: null,
       analyser: null,
       gate: null,
@@ -596,25 +776,473 @@ export class AudioEngine {
     return real?.deviceId ?? this.inputDevices[0]?.deviceId ?? "";
   }
 
+  private async applySink(audio: HTMLAudioElement | null, deviceId: string) {
+    if (!audio || !("setSinkId" in audio)) return;
+    try {
+      await (
+        audio as HTMLAudioElement & {
+          setSinkId: (id: string) => Promise<void>;
+        }
+      ).setSinkId(deviceId || "");
+    } catch (err) {
+      throw new Error(
+        err instanceof Error
+          ? err.message
+          : "Could not route audio to that output device.",
+      );
+    }
+  }
+
   async setDiscordOutputDevice(deviceId: string) {
     await this.ensureRunning();
-    this.discordDeviceId = deviceId;
-    if (this.discordAudio && "setSinkId" in this.discordAudio) {
-      try {
-        await (
-          this.discordAudio as HTMLAudioElement & {
-            setSinkId: (id: string) => Promise<void>;
-          }
-        ).setSinkId(deviceId || "");
-      } catch (err) {
-        throw new Error(
-          err instanceof Error
-            ? err.message
-            : "Could not route mix to that output device.",
-        );
-      }
+    const bank = this.lineBanks.find((b) => b.id === this.activeLineBankId);
+    if (bank) bank.mixDeviceId = deviceId;
+    if (this.activeLineBankId === this.primaryLineBankId()) {
+      this.discordDeviceId = deviceId;
+      await this.applySink(this.discordAudio, deviceId);
+    } else {
+      const out = this.ensureLineBankOutput(this.activeLineBankId);
+      await this.applySink(out.audio, deviceId);
     }
     this.emit();
+  }
+
+  async setPhonesOutputDevice(deviceId: string) {
+    await this.ensureRunning();
+    this.phonesDeviceId = deviceId;
+    await this.applySink(this.phonesAudio, deviceId);
+    this.emit();
+  }
+
+  setChannelRackName(name: string) {
+    const next = name.trim() || "Stream";
+    this.channelRackName = next;
+    const bank = this.lineBanks.find((b) => b.id === this.activeLineBankId);
+    if (bank) bank.name = next;
+    this.emit();
+  }
+
+  setCueRackName(name: string) {
+    const next = name.trim() || "Main";
+    this.cueRackName = next;
+    const bank = this.cueBanks.find((b) => b.id === this.activeCueBankId);
+    if (bank) bank.name = next;
+    this.emit();
+  }
+
+  addCueBank() {
+    if (this.cueBanks.length >= MAX_RACK_BANKS) return false;
+    const n = this.cueBanks.length + 1;
+    const bank = { id: uid("cue-bank"), name: `Bank ${n}` };
+    this.cueBanks.push(bank);
+    this.activeCueBankId = bank.id;
+    this.cueRackName = bank.name;
+    this.emit();
+    return true;
+  }
+
+  addLineBank() {
+    if (this.lineBanks.length >= MAX_RACK_BANKS) return false;
+    const n = this.lineBanks.length + 1;
+    const bank: RackBank = {
+      id: uid("line-bank"),
+      name: n === 2 ? "PC" : `Bank ${n}`,
+      mixDeviceId: "",
+      volume: 0.85,
+      muted: false,
+    };
+    this.lineBanks.push(bank);
+    this.activeLineBankId = bank.id;
+    this.channelRackName = bank.name;
+    if (this.ctx && this.mixBus) this.ensureLineBankOutput(bank.id);
+    this.emit();
+    return true;
+  }
+
+  cycleCueBank(dir: -1 | 1) {
+    if (this.cueBanks.length < 2) return;
+    const index = this.cueBanks.findIndex((b) => b.id === this.activeCueBankId);
+    const next = this.cueBanks[(index + dir + this.cueBanks.length) % this.cueBanks.length];
+    if (!next) return;
+    this.activeCueBankId = next.id;
+    this.cueRackName = next.name;
+    this.emit();
+  }
+
+  cycleLineBank(dir: -1 | 1) {
+    if (this.lineBanks.length < 2) return;
+    const index = this.lineBanks.findIndex((b) => b.id === this.activeLineBankId);
+    const next = this.lineBanks[(index + dir + this.lineBanks.length) % this.lineBanks.length];
+    if (!next) return;
+    this.activeLineBankId = next.id;
+    this.channelRackName = next.name;
+    this.emit();
+  }
+
+  private primaryLineBankId() {
+    return this.lineBanks[0]?.id ?? this.activeLineBankId;
+  }
+
+  private getLineBank(bankId: string) {
+    return this.lineBanks.find((b) => b.id === bankId);
+  }
+
+  private getActiveLineBank() {
+    return this.getLineBank(this.activeLineBankId) ?? this.lineBanks[0];
+  }
+
+  isPrimaryLineBank(bankId = this.activeLineBankId) {
+    return bankId === this.primaryLineBankId();
+  }
+
+  private busForLineBank(bankId: string): GainNode {
+    if (!this.mixBus) throw new Error("Engine not ready");
+    if (bankId === this.primaryLineBankId()) return this.mixBus;
+    return this.ensureLineBankOutput(bankId).bus;
+  }
+
+  private ensureLineBankOutput(bankId: string): LineBankOutput {
+    if (!this.ctx) throw new Error("Engine not ready");
+    const existing = this.lineBankOutputs.get(bankId);
+    if (existing) return existing;
+    const bank = this.getLineBank(bankId);
+    const bus = this.ctx.createGain();
+    bus.gain.value = 1;
+    const gain = this.ctx.createGain();
+    gain.gain.value = bank?.muted ? 0 : (bank?.volume ?? 0.85);
+    const analyser = this.ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.35;
+    const dest = this.ctx.createMediaStreamDestination();
+    bus.connect(gain);
+    gain.connect(analyser);
+    analyser.connect(dest);
+    const audio = new Audio();
+    audio.autoplay = true;
+    audio.srcObject = dest.stream;
+    void audio.play().catch(() => {
+      /* gesture / power-on */
+    });
+    if (bank?.mixDeviceId) {
+      void this.applySink(audio, bank.mixDeviceId).catch(() => {
+        /* device may be gone */
+      });
+    }
+    const out: LineBankOutput = {
+      bus,
+      gain,
+      analyser,
+      dest,
+      audio,
+      timeData: new Float32Array(analyser.fftSize),
+      peak: 0,
+      rms: 0,
+    };
+    this.lineBankOutputs.set(bankId, out);
+    return out;
+  }
+
+  private wireChannelMix(ch: ChannelNodes) {
+    try {
+      ch.gate.disconnect();
+    } catch {
+      /* first wire */
+    }
+    if (!this.monitorBus) return;
+    try {
+      ch.gate.connect(this.busForLineBank(ch.bankId));
+    } catch {
+      /* bank missing */
+    }
+  }
+
+  setCueBankId(id: string, bankId: string) {
+    const cue = this.cues.get(id);
+    if (!cue || !this.cueBanks.some((b) => b.id === bankId)) return;
+    cue.bankId = bankId;
+    this.emit();
+  }
+
+  setChannelBankId(id: string, bankId: string) {
+    const ch = this.channels.get(id);
+    if (!ch || !this.lineBanks.some((b) => b.id === bankId)) return;
+    ch.bankId = bankId;
+    this.wireChannelMix(ch);
+    this.emit();
+  }
+
+  applyRackBanks(setup: {
+    cueBanks?: RackBank[];
+    lineBanks?: RackBank[];
+    activeCueBankId?: string;
+    activeLineBankId?: string;
+  }) {
+    if (setup.cueBanks?.length) {
+      this.cueBanks = setup.cueBanks.slice(0, MAX_RACK_BANKS).map((b) => ({ ...b }));
+    }
+    if (setup.lineBanks?.length) {
+      this.lineBanks = setup.lineBanks.slice(0, MAX_RACK_BANKS).map((b, index) => ({
+        id: b.id,
+        name: b.name,
+        mixDeviceId: b.mixDeviceId ?? "",
+        volume:
+          typeof b.volume === "number"
+            ? b.volume
+            : index === 0
+              ? this.masterVolume
+              : 0.85,
+        muted: typeof b.muted === "boolean" ? b.muted : index === 0 ? this.masterMuted : false,
+      }));
+      const primary = this.lineBanks[0];
+      if (primary) {
+        this.masterVolume = primary.volume ?? 0.85;
+        this.masterMuted = Boolean(primary.muted);
+      }
+    }
+    if (
+      setup.activeCueBankId &&
+      this.cueBanks.some((b) => b.id === setup.activeCueBankId)
+    ) {
+      this.activeCueBankId = setup.activeCueBankId;
+    } else {
+      this.activeCueBankId = this.cueBanks[0]!.id;
+    }
+    if (
+      setup.activeLineBankId &&
+      this.lineBanks.some((b) => b.id === setup.activeLineBankId)
+    ) {
+      this.activeLineBankId = setup.activeLineBankId;
+    } else {
+      this.activeLineBankId = this.lineBanks[0]!.id;
+    }
+    this.cueRackName =
+      this.cueBanks.find((b) => b.id === this.activeCueBankId)?.name ?? "Main";
+    this.channelRackName =
+      this.lineBanks.find((b) => b.id === this.activeLineBankId)?.name ?? "Stream";
+    const primary = this.lineBanks[0];
+    if (primary) {
+      if (!primary.mixDeviceId && this.discordDeviceId) {
+        primary.mixDeviceId = this.discordDeviceId;
+      }
+      this.discordDeviceId = primary.mixDeviceId ?? "";
+    }
+    if (this.ctx && this.mixBus) {
+      for (const bank of this.lineBanks) {
+        if (bank.id === this.primaryLineBankId()) continue;
+        this.ensureLineBankOutput(bank.id);
+      }
+      for (const ch of this.channels.values()) this.wireChannelMix(ch);
+      void this.applyLineBankSinks();
+    }
+    this.emit();
+  }
+
+  async applyLineBankSinks() {
+    if (!this.ctx) return;
+    for (const bank of this.lineBanks) {
+      const deviceId = bank.mixDeviceId ?? "";
+      try {
+        if (bank.id === this.primaryLineBankId()) {
+          this.discordDeviceId = deviceId;
+          await this.applySink(this.discordAudio, deviceId);
+        } else {
+          const out = this.ensureLineBankOutput(bank.id);
+          await this.applySink(out.audio, deviceId);
+        }
+      } catch {
+        /* device missing */
+      }
+    }
+  }
+
+  async addPlayerTrack(file: File, fileId?: string) {
+    await this.ensureRunning();
+    if (!this.ctx) throw new Error("Engine not ready");
+    const raw = await file.arrayBuffer();
+    // decodeAudioData detaches the buffer — always pass a copy.
+    const copy = raw.slice(0);
+    let buffer: AudioBuffer;
+    try {
+      buffer = await this.ctx.decodeAudioData(copy);
+    } catch {
+      throw new Error(`Could not decode “${file.name}”. Try MP3, WAV, FLAC, or M4A.`);
+    }
+    const id = uid("play");
+    this.playerTracks.push({
+      id,
+      name: file.name.replace(/\.[^.]+$/, "") || "Track",
+      fileId: fileId ?? id,
+      buffer,
+    });
+    if (this.playerTracks.length === 1) this.playerIndex = 0;
+    this.emit();
+    return id;
+  }
+
+  async addPlayerTrackFromArrayBuffer(
+    arrayBuf: ArrayBuffer,
+    meta: { id?: string; name: string; fileId?: string },
+  ) {
+    await this.ensureRunning();
+    if (!this.ctx) throw new Error("Engine not ready");
+    const buffer = await this.ctx.decodeAudioData(arrayBuf.slice(0));
+    const id = meta.id ?? uid("play");
+    if (this.playerTracks.some((track) => track.id === id)) return id;
+    this.playerTracks.push({
+      id,
+      name: meta.name || "Track",
+      fileId: meta.fileId ?? id,
+      buffer,
+    });
+    if (this.playerTracks.length === 1) this.playerIndex = 0;
+    this.emit();
+    return id;
+  }
+
+  removePlayerTrack(id: string) {
+    const index = this.playerTracks.findIndex((track) => track.id === id);
+    if (index < 0) return;
+    const wasCurrent = index === this.playerIndex;
+    this.playerTracks.splice(index, 1);
+    if (wasCurrent) this.stopPlayerSource();
+    this.playerIndex = Math.min(this.playerIndex, Math.max(0, this.playerTracks.length - 1));
+    this.emit();
+  }
+
+  movePlayerTrack(id: string, toIndex: number) {
+    const from = this.playerTracks.findIndex((track) => track.id === id);
+    if (from < 0) return;
+    const currentId = this.playerTracks[this.playerIndex]?.id;
+    const [item] = this.playerTracks.splice(from, 1);
+    if (!item) return;
+    const index = Math.min(this.playerTracks.length, Math.max(0, Math.round(toIndex)));
+    this.playerTracks.splice(index, 0, item);
+    if (currentId) {
+      const next = this.playerTracks.findIndex((track) => track.id === currentId);
+      this.playerIndex = next >= 0 ? next : 0;
+    }
+    this.emit();
+  }
+
+  setPlayerVolume(volume: number) {
+    this.playerVolume = Math.min(1, Math.max(0, volume));
+    if (this.playerGain) {
+      this.playerGain.gain.setTargetAtTime(
+        this.playerMuted ? 0 : this.playerVolume,
+        this.ctx?.currentTime ?? 0,
+        0.01,
+      );
+    }
+    this.emit();
+  }
+
+  setPlayerMuted(muted: boolean) {
+    this.playerMuted = muted;
+    if (this.playerGain) {
+      this.playerGain.gain.setTargetAtTime(
+        muted ? 0 : this.playerVolume,
+        this.ctx?.currentTime ?? 0,
+        0.01,
+      );
+    }
+    this.applyRouting();
+    this.emit();
+  }
+
+  setPlayerToMix(toMix: boolean) {
+    this.playerToMix = toMix;
+    this.applyRouting();
+    this.emit();
+  }
+
+  setPlayerMonitor(monitor: boolean) {
+    this.playerMonitor = monitor;
+    this.applyRouting();
+    this.emit();
+  }
+
+  togglePlayerMute() {
+    this.setPlayerMuted(!this.playerMuted);
+  }
+
+  private stopPlayerSource() {
+    if (this.playerSource) {
+      try {
+        this.playerSource.onended = null;
+        this.playerSource.stop();
+        this.playerSource.disconnect();
+      } catch {
+        /* already stopped */
+      }
+      this.playerSource = null;
+    }
+    this.playerPlaying = false;
+  }
+
+  playPlayer(index?: number) {
+    if (!this.ctx || !this.playerGain) return;
+    if (typeof index === "number") {
+      this.playerIndex = Math.min(this.playerTracks.length - 1, Math.max(0, index));
+    }
+    const track = this.playerTracks[this.playerIndex];
+    if (!track) return;
+    this.stopPlayerSource();
+    const source = this.ctx.createBufferSource();
+    source.buffer = track.buffer;
+    source.connect(this.playerGain);
+    source.onended = () => {
+      if (this.playerSource !== source) return;
+      this.playerSource = null;
+      if (this.playerIndex < this.playerTracks.length - 1) {
+        this.playerIndex += 1;
+        this.playPlayer();
+        return;
+      }
+      this.playerPlaying = false;
+      this.emit();
+    };
+    source.start();
+    this.playerSource = source;
+    this.playerPlaying = true;
+    this.emit();
+  }
+
+  pausePlayer() {
+    this.stopPlayerSource();
+    this.emit();
+  }
+
+  togglePlayer() {
+    if (this.playerPlaying) this.pausePlayer();
+    else this.playPlayer();
+  }
+
+  setPlayerIndex(index: number) {
+    if (!this.playerTracks.length) {
+      this.playerIndex = 0;
+      this.emit();
+      return;
+    }
+    this.playerIndex = Math.min(
+      this.playerTracks.length - 1,
+      Math.max(0, Math.round(index)),
+    );
+    this.emit();
+  }
+
+  nextPlayerTrack() {
+    if (!this.playerTracks.length) return;
+    this.playerIndex = (this.playerIndex + 1) % this.playerTracks.length;
+    if (this.playerPlaying) this.playPlayer();
+    else this.emit();
+  }
+
+  prevPlayerTrack() {
+    if (!this.playerTracks.length) return;
+    this.playerIndex =
+      (this.playerIndex - 1 + this.playerTracks.length) % this.playerTracks.length;
+    if (this.playerPlaying) this.playPlayer();
+    else this.emit();
   }
 
   setMonitorMix(enabled: boolean) {
@@ -656,7 +1284,37 @@ export class AudioEngine {
     const src = this.ctx.createBufferSource();
     src.buffer = cue.buffer;
     src.connect(cue.inputGain);
+    let voices = this.cueVoices.get(id);
+    if (!voices) {
+      voices = new Set();
+      this.cueVoices.set(id, voices);
+    }
+    voices.add(src);
+    src.onended = () => {
+      voices!.delete(src);
+      try {
+        src.disconnect();
+      } catch {
+        /* already disconnected */
+      }
+    };
     src.start();
+  }
+
+  /** Stop every overlapping play of this cue only (not the whole rack). */
+  stopCue(id: string) {
+    const voices = this.cueVoices.get(id);
+    if (!voices?.size) return;
+    for (const src of voices) {
+      try {
+        src.onended = null;
+        src.stop();
+        src.disconnect();
+      } catch {
+        /* already stopped */
+      }
+    }
+    voices.clear();
   }
 
   async addCueFromFile(file: File, name?: string, fileId?: string) {
@@ -682,9 +1340,11 @@ export class AudioEngine {
     meta: {
       id?: string;
       name: string;
+      bankId?: string;
       fileId?: string;
       hotkey?: string | null;
       pad?: number | null;
+      midiNote?: number | null;
       volume?: number;
       muted?: boolean;
       solo?: boolean;
@@ -702,11 +1362,13 @@ export class AudioEngine {
         fileId: meta.fileId,
         hotkey: meta.hotkey ?? null,
         pad: meta.pad ?? null,
+        midiNote: meta.midiNote ?? null,
         volume: meta.volume,
         muted: meta.muted,
         solo: meta.solo,
         toMix: meta.toMix,
         monitor: meta.monitor,
+        bankId: meta.bankId ?? this.activeCueBankId,
       }),
     );
     this.applyRouting();
@@ -721,12 +1383,13 @@ export class AudioEngine {
     this.emit();
   }
 
-  /** Assign an MPD226 pad (0–15). Null clears it. One pad plays one cue. */
+  /** Assign a logical pad slot (0–15). Null clears pad + learned note. */
   setCuePad(id: string, pad: number | null) {
     const cue = this.cues.get(id);
     if (!cue) return;
     if (pad === null) {
       cue.pad = null;
+      cue.midiNote = null;
       this.emit();
       return;
     }
@@ -735,6 +1398,23 @@ export class AudioEngine {
       if (other.id !== id && other.pad === next) other.pad = null;
     }
     cue.pad = next;
+    this.emit();
+  }
+
+  /** Bind the exact MIDI note from any controller. Clears other cues on that note. */
+  setCueMidiNote(id: string, note: number | null) {
+    const cue = this.cues.get(id);
+    if (!cue) return;
+    if (note === null) {
+      cue.midiNote = null;
+      this.emit();
+      return;
+    }
+    const next = Math.min(127, Math.max(0, Math.round(note)));
+    for (const other of this.cues.values()) {
+      if (other.id !== id && other.midiNote === next) other.midiNote = null;
+    }
+    cue.midiNote = next;
     this.emit();
   }
 
@@ -789,6 +1469,8 @@ export class AudioEngine {
   removeCue(id: string) {
     const cue = this.cues.get(id);
     if (!cue || cue.builtin) return;
+    this.stopCue(id);
+    this.cueVoices.delete(id);
     try {
       cue.inputGain?.disconnect();
       cue.analyser?.disconnect();
@@ -804,16 +1486,33 @@ export class AudioEngine {
 
   exportSetup(): SavedSetup {
     return {
-      version: 4,
+      version: 6,
       masterVolume: this.masterVolume,
       masterMuted: this.masterMuted,
       masterEq: this.masterEqBands.map((b) => ({ ...b })),
       cueMasterVolume: this.cueMasterVolume,
       cueMasterMuted: this.cueMasterMuted,
       cueEq: this.cueEqBands.map((b) => ({ ...b })),
+      playerVolume: this.playerVolume,
+      playerMuted: this.playerMuted,
+      playerToMix: this.playerToMix,
+      playerMonitor: this.playerMonitor,
+      playerIndex: this.playerIndex,
+      playerTracks: this.playerTracks.map((track) => ({
+        id: track.id,
+        name: track.name,
+        fileId: track.fileId,
+      })),
+      channelRackName: this.channelRackName,
+      cueRackName: this.cueRackName,
+      cueBanks: this.cueBanks.map((b) => ({ ...b })),
+      lineBanks: this.lineBanks.map((b) => ({ ...b })),
+      activeCueBankId: this.activeCueBankId,
+      activeLineBankId: this.activeLineBankId,
       monitorMix: this.monitorMix,
       monitorVolume: this.monitorVolume,
       discordDeviceId: this.discordDeviceId,
+      phonesDeviceId: this.phonesDeviceId,
       channels: [...this.channels.values()]
         .filter(
           (c) =>
@@ -831,12 +1530,15 @@ export class AudioEngine {
           solo: c.solo,
           toMix: c.toMix,
           monitor: c.monitor,
+          bankId: c.bankId,
           deviceId: c.deviceId,
           deviceLabel: c.deviceLabel,
           captureMode: c.captureMode,
           eq: c.eqBands.map((b) => ({ ...b })),
           fx: { ...c.fx },
           boostDb: c.boostDb,
+          noiseCancel: c.noiseCancel,
+          noiseGate: c.noiseGate,
         })),
       cues: [...this.cues.values()].map((c) => ({
         id: c.id,
@@ -845,11 +1547,13 @@ export class AudioEngine {
         hotkey: c.hotkey,
         fileId: c.fileId,
         pad: c.pad,
+        midiNote: c.midiNote,
         volume: c.volume,
         muted: c.muted,
         solo: c.solo,
         toMix: c.toMix,
         monitor: c.monitor,
+        bankId: c.bankId,
       })),
     };
   }
@@ -865,6 +1569,8 @@ export class AudioEngine {
       eq?: EqBand[];
       fx?: ChannelFx;
       boostDb?: number;
+      noiseCancel?: boolean;
+      noiseGate?: number;
     },
   ) {
     const ch = this.channels.get(channelId);
@@ -879,6 +1585,9 @@ export class AudioEngine {
       ch.boostDb = Math.min(24, Math.max(0, settings.boostDb));
       ch.boostGain.gain.value = dbToLinear(ch.boostDb);
     }
+    if (typeof settings.noiseGate === "number") {
+      ch.noiseGate = Math.min(1, Math.max(0, settings.noiseGate));
+    }
     if (settings.eq) {
       ch.eqBands = settings.eq.map((b) => ({ ...b }));
       this.applyFilterParams(ch);
@@ -889,6 +1598,9 @@ export class AudioEngine {
     }
     this.applyRouting();
     this.emit();
+    if (typeof settings.noiseCancel === "boolean" && ch.kind === "mic") {
+      await this.setMicNoiseCancel(channelId, settings.noiseCancel);
+    }
   }
 
   setChannelFx(channelId: string, patch: Partial<ChannelFx>) {
@@ -931,7 +1643,27 @@ export class AudioEngine {
   }
 
   private updateMeters() {
+    const t = this.ctx?.currentTime ?? 0;
     for (const ch of this.channels.values()) {
+      if (ch.noiseGateGain && ch.noiseSense && ch.noiseSenseData) {
+        if (ch.noiseGate <= 0.01 || !ch.connected) {
+          ch.noiseGateGain.gain.setTargetAtTime(1, t, 0.02);
+        } else {
+          ch.noiseSense.getFloatTimeDomainData(
+            ch.noiseSenseData as Float32Array<ArrayBuffer>,
+          );
+          let sum = 0;
+          for (let i = 0; i < ch.noiseSenseData.length; i++) {
+            const s = ch.noiseSenseData[i]!;
+            sum += s * s;
+          }
+          const rms = Math.sqrt(sum / ch.noiseSenseData.length);
+          // Higher gate = higher threshold (more of the room stays out).
+          const threshold = 0.004 + ch.noiseGate * 0.045;
+          const open = rms >= threshold ? 1 : 0;
+          ch.noiseGateGain.gain.setTargetAtTime(open, t, open ? 0.012 : 0.06);
+        }
+      }
       if (!ch.connected) {
         ch.peak *= this.peakHoldDecay;
         ch.rms *= 0.85;
@@ -959,6 +1691,18 @@ export class AudioEngine {
       this.readMeter(this.cueMasterAnalyser, this.cueMasterTimeData, prev);
       this.cueMasterPeak = prev.peak;
       this.cueMasterRms = prev.rms;
+    }
+    if (this.playerAnalyser && this.playerTimeData) {
+      const prev = { peak: this.playerPeak, rms: this.playerRms };
+      this.readMeter(this.playerAnalyser, this.playerTimeData, prev);
+      this.playerPeak = prev.peak;
+      this.playerRms = prev.rms;
+    } else {
+      this.playerPeak *= this.peakHoldDecay;
+      this.playerRms *= 0.85;
+    }
+    for (const out of this.lineBankOutputs.values()) {
+      this.readMeter(out.analyser, out.timeData, out);
     }
   }
 
@@ -1046,6 +1790,23 @@ export class AudioEngine {
     const fxGraph = createFxGraph(this.ctx, this.impulse);
     const fx = defaultFx();
     fxGraph.apply(fx);
+
+    let noiseGateGain: GainNode | null = null;
+    let noiseSense: AnalyserNode | null = null;
+    let noiseSenseData: Float32Array | null = null;
+    if (kind === "mic") {
+      noiseGateGain = this.ctx.createGain();
+      noiseGateGain.gain.value = 1;
+      noiseSense = this.ctx.createAnalyser();
+      noiseSense.fftSize = 2048;
+      noiseSense.smoothingTimeConstant = 0.5;
+      noiseSenseData = new Float32Array(noiseSense.fftSize);
+      boostGain.disconnect();
+      boostGain.connect(noiseSense);
+      boostGain.connect(noiseGateGain);
+      noiseGateGain.connect(inputGain);
+    }
+
     if (eqIn && eqOut) {
       inputGain.connect(eqIn);
       eqOut.connect(fxGraph.input);
@@ -1055,10 +1816,9 @@ export class AudioEngine {
     fxGraph.output.connect(analyser);
     analyser.connect(gate);
     analyser.connect(monGate);
-    gate.connect(this.mixBus);
     monGate.connect(this.monitorBus);
 
-    // Only mic/app (isolated) default onto the Discord mix. System loopback stays off.
+    // Only mic/app (isolated) default onto the main mix. System loopback stays off.
     const defaultToMix =
       opts?.toMix ?? (kind === "mic" || kind === "app" || kind === "tone" || kind === "file");
 
@@ -1071,6 +1831,7 @@ export class AudioEngine {
       solo: false,
       toMix: defaultToMix,
       monitor: false,
+      bankId: this.activeLineBankId,
       connected: false,
       deviceId: opts?.deviceId ?? "",
       deviceLabel: opts?.deviceLabel ?? "",
@@ -1092,6 +1853,11 @@ export class AudioEngine {
       analyser,
       gate,
       monGate,
+      noiseCancel: kind === "mic",
+      noiseGate: kind === "mic" ? 0.4 : 0,
+      noiseGateGain,
+      noiseSense,
+      noiseSenseData,
       fileElement: null,
       toneOsc: null,
       toneGain: null,
@@ -1100,6 +1866,7 @@ export class AudioEngine {
       timeData: new Float32Array(analyser.fftSize),
     };
     this.channels.set(channel.id, channel);
+    this.wireChannelMix(channel);
     this.applyRouting();
     return channel;
   }
@@ -1123,9 +1890,34 @@ export class AudioEngine {
       cue.gate.gain.setTargetAtTime(toMix ? 1 : 0, t, 0.015);
       cue.monGate.gain.setTargetAtTime(toMon ? 1 : 0, t, 0.015);
     }
+    if (this.playerMixGate && this.playerMonGate) {
+      const playMix = this.playerToMix && !this.playerMuted;
+      const playMon = this.playerMonitor && !this.playerMuted;
+      this.playerMixGate.gain.setTargetAtTime(playMix ? 1 : 0, t, 0.015);
+      this.playerMonGate.gain.setTargetAtTime(playMon ? 1 : 0, t, 0.015);
+    }
+    const primary = this.lineBanks[0];
     if (this.masterGain) {
-      this.masterGain.gain.setTargetAtTime(
-        this.masterMuted ? 0 : this.masterVolume,
+      const vol = primary?.volume ?? this.masterVolume;
+      const muted = primary?.muted ?? this.masterMuted;
+      this.masterGain.gain.setTargetAtTime(muted ? 0 : vol, t, 0.015);
+    }
+    for (const bank of this.lineBanks) {
+      if (bank.id === this.primaryLineBankId()) continue;
+      const out = this.lineBankOutputs.get(bank.id);
+      if (!out) continue;
+      out.gain.gain.setTargetAtTime(
+        bank.muted ? 0 : (bank.volume ?? 0.85),
+        t,
+        0.015,
+      );
+    }
+    if (this.monitorGain) {
+      const listen = this.getActiveLineBank();
+      const earsMuted =
+        !!listen && listen.id !== this.primaryLineBankId() && !!listen.muted;
+      this.monitorGain.gain.setTargetAtTime(
+        earsMuted ? 0 : this.monitorVolume,
         t,
         0.015,
       );
@@ -1242,14 +2034,27 @@ export class AudioEngine {
   }
 
   moveCue(id: string, toIndex: number) {
-    const entries = [...this.cues.entries()];
-    const from = entries.findIndex(([cueId]) => cueId === id);
+    const cue = this.cues.get(id);
+    if (!cue) return;
+    const all = [...this.cues.entries()];
+    const bankEntries = all.filter(([, c]) => c.bankId === cue.bankId);
+    const from = bankEntries.findIndex(([cueId]) => cueId === id);
     if (from < 0) return;
-    const [item] = entries.splice(from, 1);
+    const [item] = bankEntries.splice(from, 1);
     if (!item) return;
-    const index = Math.min(entries.length, Math.max(0, Math.round(toIndex)));
-    entries.splice(index, 0, item);
-    this.cues = new Map(entries);
+    const index = Math.min(bankEntries.length, Math.max(0, Math.round(toIndex)));
+    bankEntries.splice(index, 0, item);
+    let bi = 0;
+    const next = new Map<string, CueNodes>();
+    for (const [cueId, node] of all) {
+      if (node.bankId === cue.bankId) {
+        const replacement = bankEntries[bi++];
+        if (replacement) next.set(replacement[0], replacement[1]);
+      } else {
+        next.set(cueId, node);
+      }
+    }
+    this.cues = next;
     this.emit();
   }
 
@@ -1346,13 +2151,13 @@ export class AudioEngine {
     channel.connected = false;
   }
 
-  private async openMicStream(deviceId?: string) {
+  private async openMicStream(deviceId?: string, noiseCancel = true) {
     if (window.mixlineDesktop) {
       await window.mixlineDesktop.requestMicAccess();
     }
     const audio: MediaTrackConstraints = {
-      echoCancellation: false,
-      noiseSuppression: false,
+      echoCancellation: noiseCancel,
+      noiseSuppression: noiseCancel,
       autoGainControl: false,
     };
     if (deviceId) audio.deviceId = { exact: deviceId };
@@ -1362,14 +2167,14 @@ export class AudioEngine {
   async addMic(name = "Mic", deviceId?: string) {
     await this.ensureRunning();
     // First grab any mic so labels populate, then reopen the chosen device if needed.
-    let stream = await this.openMicStream(deviceId || undefined);
+    let stream = await this.openMicStream(deviceId || undefined, true);
     await this.refreshDevices();
     const chosen = deviceId || this.preferredMicDeviceId();
     if (chosen && !deviceId) {
       const trackDevice = stream.getAudioTracks()[0]?.getSettings().deviceId;
       if (trackDevice && trackDevice !== chosen) {
         stream.getTracks().forEach((t) => t.stop());
-        stream = await this.openMicStream(chosen);
+        stream = await this.openMicStream(chosen, true);
       }
     }
     const channel = this.createChannelShell("mic", name, {
@@ -1393,7 +2198,7 @@ export class AudioEngine {
       throw new Error("Not a mic channel.");
     }
     await this.ensureRunning();
-    const stream = await this.openMicStream(deviceId || undefined);
+    const stream = await this.openMicStream(deviceId || undefined, channel.noiseCancel);
     channel.deviceId =
       deviceId || stream.getAudioTracks()[0]?.getSettings().deviceId || "";
     channel.deviceLabel =
@@ -1402,6 +2207,31 @@ export class AudioEngine {
     channel.needsReconnect = false;
     this.attachStream(channel, stream);
     await this.refreshDevices();
+  }
+
+  async setMicNoiseCancel(channelId: string, enabled: boolean) {
+    const channel = this.channels.get(channelId);
+    if (!channel || channel.kind !== "mic") return;
+    channel.noiseCancel = enabled;
+    if (!channel.deviceId && !channel.connected) {
+      this.emit();
+      return;
+    }
+    try {
+      const stream = await this.openMicStream(channel.deviceId || undefined, enabled);
+      this.attachStream(channel, stream);
+      await this.refreshDevices();
+    } catch {
+      /* keep prior stream if reopen fails */
+    }
+    this.emit();
+  }
+
+  setMicNoiseGate(channelId: string, amount: number) {
+    const channel = this.channels.get(channelId);
+    if (!channel || channel.kind !== "mic") return;
+    channel.noiseGate = Math.min(1, Math.max(0, amount));
+    this.emit();
   }
 
   private ensurePcmListener() {
@@ -1716,24 +2546,59 @@ export class AudioEngine {
     this.emit();
   }
 
-  setToMix(id: string, toMix: boolean) {
+  setToMix(id: string, toMix: boolean): string | null {
     const ch = this.channels.get(id);
-    if (!ch) return;
+    if (!ch) return null;
     ch.toMix = toMix;
     this.applyRouting();
     this.emit();
+    if (!toMix) return null;
+    if (ch.captureMode === "system") {
+      return "System capture on a listen rack echoes if Mix send is your headphones. Prefer App strips (Chrome, game, Steam), and use MixLine Player with MON for music in your ears.";
+    }
+    return null;
   }
 
   setMasterVolume(volume: number) {
-    this.masterVolume = Math.min(1, Math.max(0, volume));
+    const next = Math.min(1, Math.max(0, volume));
+    const bank = this.getActiveLineBank();
+    if (bank) bank.volume = next;
+    if (!bank || bank.id === this.primaryLineBankId()) {
+      // Stream rack Mix = Discord/OBS send level only.
+      this.masterVolume = next;
+    } else {
+      // PC / listen rack Mix = ear volume (Player/Cue MON + apps on this rack).
+      this.monitorVolume = next;
+      if (this.monitorGain) {
+        this.monitorGain.gain.setTargetAtTime(
+          bank.muted ? 0 : next,
+          this.ctx?.currentTime ?? 0,
+          0.02,
+        );
+      }
+    }
     this.applyRouting();
     this.emit();
   }
 
   setMasterMuted(muted: boolean) {
-    this.masterMuted = muted;
+    const bank = this.getActiveLineBank();
+    if (bank) bank.muted = muted;
+    if (!bank || bank.id === this.primaryLineBankId()) {
+      this.masterMuted = muted;
+    }
     this.applyRouting();
     this.emit();
+  }
+
+  private activeMasterPeak() {
+    if (this.isPrimaryLineBank()) return this.masterPeak;
+    return this.lineBankOutputs.get(this.activeLineBankId)?.peak ?? 0;
+  }
+
+  private activeMasterRms() {
+    if (this.isPrimaryLineBank()) return this.masterRms;
+    return this.lineBankOutputs.get(this.activeLineBankId)?.rms ?? 0;
   }
 
   removeChannel(id: string) {
@@ -1767,10 +2632,17 @@ export class AudioEngine {
       if (!this.cues.get(id)?.builtin) this.removeCue(id);
     }
     this.cues.clear();
+    this.stopPlayerSource();
+    this.playerTracks = [];
     if (this.discordAudio) {
       this.discordAudio.pause();
       this.discordAudio.srcObject = null;
       this.discordAudio = null;
+    }
+    if (this.phonesAudio) {
+      this.phonesAudio.pause();
+      this.phonesAudio.srcObject = null;
+      this.phonesAudio = null;
     }
     void this.ctx?.close();
     this.ctx = null;
@@ -1787,6 +2659,22 @@ export class AudioEngine {
     this.mixToMonitor = null;
     this.discordGain = null;
     this.mixDestination = null;
+    this.phonesDestination = null;
+    this.playerGain = null;
+    this.playerAnalyser = null;
+    this.playerMixGate = null;
+    this.playerMonGate = null;
+    this.playerTimeData = null;
+    for (const out of this.lineBankOutputs.values()) {
+      try {
+        out.bus.disconnect();
+        out.audio.pause();
+        out.audio.srcObject = null;
+      } catch {
+        /* noop */
+      }
+    }
+    this.lineBankOutputs.clear();
     this.emit();
   }
 }

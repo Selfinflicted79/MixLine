@@ -54,6 +54,8 @@ type ChannelStripProps = {
   onRename: (name: string) => void;
   onRemove: () => void;
   onMicDevice?: (deviceId: string) => void;
+  onNoiseCancel?: (enabled: boolean) => void;
+  onNoiseGate?: (amount: number) => void;
   onEnterEq: () => void;
   onExitEq: () => void;
   onEqGain: (bandId: string, gainDb: number) => void;
@@ -79,6 +81,8 @@ export function ChannelStrip({
   onRename,
   onRemove,
   onMicDevice,
+  onNoiseCancel,
+  onNoiseGate,
   onEnterEq,
   onExitEq,
   onEqGain,
@@ -170,6 +174,32 @@ export function ChannelStrip({
             ))}
           </select>
         </label>
+      ) : null}
+
+      {!eqMode && !fxMode && channel.kind === "mic" && onNoiseCancel && onNoiseGate ? (
+        <div className="flex flex-col items-center gap-1">
+          <button
+            type="button"
+            className={cn(
+              "btn-lit h-7 w-full text-[10px]",
+              channel.noiseCancel
+                ? "bg-[color:var(--neon-cyan)]/20 text-[color:var(--neon-cyan)]"
+                : "bg-[color:var(--chip)] text-[color:var(--console-ink)]",
+            )}
+            title="OS noise suppression + echo cancel on this mic"
+            onClick={() => onNoiseCancel(!channel.noiseCancel)}
+          >
+            NC {channel.noiseCancel ? "ON" : "OFF"}
+          </button>
+          <RotaryKnob
+            compact
+            label="Gate"
+            display={channel.noiseGate < 0.02 ? "OFF" : `${Math.round(channel.noiseGate * 100)}`}
+            value={channel.noiseGate}
+            accent="cyan"
+            onChange={onNoiseGate}
+          />
+        </div>
       ) : null}
 
       {!eqMode && !fxMode && channel.captureMode === "process" ? (

@@ -1,6 +1,6 @@
 {
   "name": "mixline",
-  "version": "0.2.19",
+  "version": "0.2.29",
   "private": true,
   "description": "A small desktop mixing board for mic, PC, and app audio",
   "author": "MixLine",
@@ -32,6 +32,10 @@
       {
         "from": "native/bin/mixline-capture.exe",
         "to": "mixline-capture.exe"
+      },
+      {
+        "from": "electron/splash",
+        "to": "splash"
       }
     ],
     "win": {

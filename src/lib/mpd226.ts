@@ -1,18 +1,29 @@
 /**
- * Akai MPD226 → MixLine.
- * Factory programs don't share one MIDI map. Live Lite is the power-on program
- * (faders CC 12–15, knobs CC 22–25, scale notes). Most other programs, including
- * Generic, use faders CC 20–23 and knobs CC 3, 9, 14, 15 with pads on notes 36–51.
- * The first message that can only belong to one program picks the map.
+ * MIDI controller → MixLine.
+ * Any USB / virtual MIDI input can be selected. MPD226 factory maps are still
+ * recognized for pads, faders, and knobs. BPH Share (Stream Controller) is an
+ * optional localhost feed when another BPH app owns the hardware port.
  */
+
+export type MidiDeviceOption = {
+  id: string;
+  name: string;
+};
 
 export type MpdStatus = {
   connected: boolean;
-  /** "BPH Share" when Stream Controller owns the pad and is relaying it. */
+  /** Live source label: device name, "BPH Share", or null. */
   name: string | null;
+  preferred: string;
+  devices: MidiDeviceOption[];
+  shareAvailable: boolean;
 };
 
 const SHARE_URL = "ws://127.0.0.1:18726/";
+const DEVICE_KEY = "mixline.midi.device";
+/** Prefer BPH Share when Stream Controller is on. Else first matching hardware. */
+export const MIDI_AUTO = "auto";
+export const MIDI_SHARE = "bph-share";
 
 type Controls = "livelite" | "generic" | "reason" | "bitwig" | "protools" | "cubase";
 
@@ -88,6 +99,21 @@ export function saveMpdAssign(assign: MpdAssign) {
   localStorage.setItem(ASSIGN_KEY, JSON.stringify(assign));
 }
 
+export function loadMidiDevice(): string {
+  try {
+    const raw = localStorage.getItem(DEVICE_KEY);
+    if (raw === MIDI_SHARE || raw === MIDI_AUTO) return raw;
+    if (raw && raw.length > 0) return raw;
+  } catch {
+    /* ignore */
+  }
+  return MIDI_AUTO;
+}
+
+export function saveMidiDevice(id: string) {
+  localStorage.setItem(DEVICE_KEY, id);
+}
+
 type NamedChannel = { id: string; name: string; kind: string };
 
 function liveInputs(channels: NamedChannel[]) {
@@ -152,38 +178,87 @@ export function controlLabel(control: MpdControl, channels: NamedChannel[]) {
   return control.kind === "trim" ? `${name} trim` : name;
 }
 
+/** Map a note to pad slots 0–15 for known MPD226 factory layouts. */
+export function mapNoteToPad(note: number) {
+  if (note >= 36 && note <= 51) return note - 36;
+  const live = LIVELITE_NOTES.indexOf(note);
+  if (live >= 0) return live;
+  const drum = DRUM_NOTES.indexOf(note);
+  if (drum >= 0) return drum;
+  const studio = STUDIO_NOTES.indexOf(note);
+  if (studio >= 0) return studio;
+  if (note >= 52 && note <= 99) return (note - 36) % 16;
+  return null;
+}
+
 type MpdHandlers = {
+  preferred: string;
   onStatus: (status: MpdStatus) => void;
-  onPad: (index: number) => void;
+  onNote: (note: number) => void;
   onFader: (index: number, value: number) => void;
   onKnob: (index: number, value: number) => void;
   onSwitch: (index: number) => void;
 };
 
+function isMpdName(name: string | null | undefined) {
+  return /mpd\s*-?\s*226/i.test(name ?? "");
+}
+
+function shortName(name: string) {
+  return name.length > 22 ? `${name.slice(0, 20)}…` : name;
+}
+
 export function startMpd226(handlers: MpdHandlers) {
   let stopped = false;
+  let preferred = handlers.preferred || MIDI_AUTO;
   let access: MIDIAccess | null = null;
   let shareSocket: WebSocket | null = null;
   let shareLive = false;
   let shareSeen = false;
-  let hardwareOpened = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let controls: Controls = "livelite";
-  // Proved by a CC that is a fader on only one program. A pad must not change this —
-  // Live Lite faders are CC 12–15, and notes 36–51 used to flip the map to Generic
-  // and the sliders went dead.
   let liveliteFaders = false;
   let genericFaders = false;
   const switchHigh = [false, false, false, false];
-  const inputs = new Set<MIDIInput>();
+  const bound = new Set<MIDIInput>();
 
-  const isMpd = (name: string | null | undefined) => /mpd\s*-?\s*226/i.test(name ?? "");
+  function deviceList(): MidiDeviceOption[] {
+    if (!access) return [];
+    return [...access.inputs.values()]
+      .filter((input) => input.state !== "disconnected")
+      .map((input) => ({ id: input.id, name: input.name || input.id }));
+  }
+
+  function pickHardware(): MIDIInput | null {
+    if (!access) return null;
+    const inputs = [...access.inputs.values()].filter((input) => input.state !== "disconnected");
+    if (!inputs.length) return null;
+    if (preferred !== MIDI_AUTO && preferred !== MIDI_SHARE) {
+      return inputs.find((input) => input.id === preferred) ?? null;
+    }
+    return inputs.find((input) => isMpdName(input.name)) ?? inputs[0] ?? null;
+  }
+
+  function usingShare() {
+    if (preferred === MIDI_SHARE) return shareLive;
+    if (preferred === MIDI_AUTO) return shareLive;
+    return false;
+  }
 
   function publish() {
-    const open = [...inputs].filter((input) => input.state !== "disconnected" && isMpd(input.name));
+    const devices = deviceList();
+    const hardware = pickHardware();
+    const share = usingShare();
+    const connected = share || (!!hardware && preferred !== MIDI_SHARE);
+    let name: string | null = null;
+    if (share) name = "BPH Share";
+    else if (hardware && preferred !== MIDI_SHARE) name = hardware.name || hardware.id;
     handlers.onStatus({
-      connected: shareLive || open.length > 0,
-      name: shareLive ? "BPH Share" : (open[0]?.name ?? null),
+      connected,
+      name,
+      preferred,
+      devices,
+      shareAvailable: shareSeen || shareLive,
     });
   }
 
@@ -203,21 +278,10 @@ export function startMpd226(handlers: MpdHandlers) {
     if (packet.type !== "midi" || !Array.isArray(packet.bytes) || packet.bytes.length < 2) return;
     shareLive = true;
     shareSeen = true;
-    onMessage(Uint8Array.from(packet.bytes));
-  }
-
-  function padIndex(note: number) {
-    // Bank A on Generic and most other programs: pad 1 (bottom left) is note 36.
-    // Cue 8, the usual trumpet slot, is pad 8 — second row, right end.
-    if (note >= 36 && note <= 51) return note - 36;
-    const live = LIVELITE_NOTES.indexOf(note);
-    if (live >= 0) return live;
-    const drum = DRUM_NOTES.indexOf(note);
-    if (drum >= 0) return drum;
-    const studio = STUDIO_NOTES.indexOf(note);
-    if (studio >= 0) return studio;
-    if (note >= 52 && note <= 99) return (note - 36) % 16;
-    return null;
+    if (preferred === MIDI_SHARE || preferred === MIDI_AUTO) {
+      onMessage(Uint8Array.from(packet.bytes));
+    }
+    publish();
   }
 
   function onCc(cc: number, channel: number, raw: number) {
@@ -302,24 +366,33 @@ export function startMpd226(handlers: MpdHandlers) {
     if (kind === 0x90) {
       const velocity = data[2] ?? 0;
       if (velocity === 0) return;
-      const index = padIndex(data[1] ?? 0);
-      if (index !== null) handlers.onPad(index);
+      handlers.onNote(data[1] ?? 0);
       return;
     }
     if (kind === 0xb0) onCc(data[1] ?? 0, channel, data[2] ?? 0);
   }
 
+  function clearHardware() {
+    for (const input of bound) input.onmidimessage = null;
+    bound.clear();
+  }
+
   function bind() {
     if (!access) return;
-    for (const input of access.inputs.values()) {
-      if (!isMpd(input.name)) {
-        input.onmidimessage = null;
-        inputs.delete(input);
-        continue;
-      }
-      inputs.add(input);
-      input.onmidimessage = (event) => {
-        if (shareLive) return;
+    clearHardware();
+    if (preferred === MIDI_SHARE) {
+      publish();
+      return;
+    }
+    if (preferred === MIDI_AUTO && shareLive) {
+      publish();
+      return;
+    }
+    const hardware = pickHardware();
+    if (hardware) {
+      bound.add(hardware);
+      hardware.onmidimessage = (event) => {
+        if (preferred === MIDI_AUTO && shareLive) return;
         onMessage(event.data ?? null);
       };
     }
@@ -330,24 +403,20 @@ export function startMpd226(handlers: MpdHandlers) {
     requestMIDIAccess?: (options?: { sysex?: boolean }) => Promise<MIDIAccess>;
   };
 
-  function openHardware() {
-    // Stream Controller owns the real port and copies every hit to the share hub.
-    // Opening the pad here locks it, so this only runs when that hub is absent.
-    if (stopped || hardwareOpened || shareSeen || shareLive) return;
-    if (!nav.requestMIDIAccess) {
-      handlers.onStatus({ connected: false, name: null });
+  function openHardwareAccess() {
+    if (stopped || access || !nav.requestMIDIAccess) {
+      if (!nav.requestMIDIAccess) publish();
       return;
     }
-    hardwareOpened = true;
     void nav.requestMIDIAccess({ sysex: false }).then(
       (midi) => {
-        if (stopped || shareLive) return;
+        if (stopped) return;
         access = midi;
         midi.onstatechange = () => bind();
         bind();
       },
       () => {
-        if (!stopped && !shareLive) handlers.onStatus({ connected: false, name: null });
+        if (!stopped) publish();
       },
     );
   }
@@ -366,7 +435,7 @@ export function startMpd226(handlers: MpdHandlers) {
     try {
       ws = new WebSocket(SHARE_URL);
     } catch {
-      if (!shareSeen) openHardware();
+      openHardwareAccess();
       scheduleShareRetry();
       return;
     }
@@ -374,7 +443,8 @@ export function startMpd226(handlers: MpdHandlers) {
     ws.onopen = () => {
       shareLive = true;
       shareSeen = true;
-      publish();
+      bind();
+      openHardwareAccess();
     };
     ws.onmessage = (event) => {
       if (typeof event.data === "string") feedShare(event.data);
@@ -390,24 +460,46 @@ export function startMpd226(handlers: MpdHandlers) {
     ws.onclose = () => {
       if (shareSocket === ws) shareSocket = null;
       shareLive = false;
-      publish();
-      if (!shareSeen) openHardware();
+      bind();
+      openHardwareAccess();
       scheduleShareRetry();
     };
   }
 
   connectShare();
+  // List devices even when Share is preferred.
+  openHardwareAccess();
+  publish();
 
-  return () => {
-    stopped = true;
-    if (retryTimer !== null) clearTimeout(retryTimer);
-    if (shareSocket) {
-      shareSocket.onclose = null;
-      shareSocket.close();
-      shareSocket = null;
-    }
-    if (access) access.onstatechange = null;
-    for (const input of inputs) input.onmidimessage = null;
-    inputs.clear();
+  return {
+    stop() {
+      stopped = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      if (shareSocket) {
+        shareSocket.onclose = null;
+        shareSocket.close();
+        shareSocket = null;
+      }
+      if (access) access.onstatechange = null;
+      clearHardware();
+    },
+    setPreferred(id: string) {
+      preferred = id || MIDI_AUTO;
+      saveMidiDevice(preferred);
+      bind();
+      publish();
+    },
+    refresh() {
+      bind();
+      publish();
+    },
+    chipLabel() {
+      if (usingShare()) return "BPH Share";
+      const hardware = pickHardware();
+      if (hardware && preferred !== MIDI_SHARE) return shortName(hardware.name || "MIDI");
+      return "MIDI off";
+    },
   };
 }
+
+export type MidiControllerSession = ReturnType<typeof startMpd226>;

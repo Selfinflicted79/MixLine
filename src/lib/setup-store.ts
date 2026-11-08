@@ -10,7 +10,12 @@ function isSavedSetup(value: unknown): value is SavedSetup {
   return (
     typeof value === "object" &&
     value !== null &&
-    (v.version === 1 || v.version === 2 || v.version === 3 || v.version === 4) &&
+    (v.version === 1 ||
+      v.version === 2 ||
+      v.version === 3 ||
+      v.version === 4 ||
+      v.version === 5 ||
+      v.version === 6) &&
     Array.isArray(v.channels) &&
     Array.isArray(v.cues)
   );
@@ -77,6 +82,39 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
   if (typeof raw.cueMasterMuted === "boolean") {
     audioEngine.setCueMasterMuted(raw.cueMasterMuted);
   }
+  if (typeof raw.playerVolume === "number") audioEngine.setPlayerVolume(raw.playerVolume);
+  if (typeof raw.playerMuted === "boolean") audioEngine.setPlayerMuted(raw.playerMuted);
+  if (typeof raw.playerToMix === "boolean") audioEngine.setPlayerToMix(raw.playerToMix);
+  if (typeof raw.playerMonitor === "boolean") audioEngine.setPlayerMonitor(raw.playerMonitor);
+
+  if (Array.isArray(raw.playerTracks) && window.mixlineDesktop) {
+    for (const track of raw.playerTracks) {
+      if (!track?.fileId && !track?.id) continue;
+      const fileId = track.fileId || track.id;
+      try {
+        const bytes = await window.mixlineDesktop.loadCueFile(fileId);
+        if (!bytes) continue;
+        await audioEngine.addPlayerTrackFromArrayBuffer(bytes, {
+          id: track.id,
+          name: track.name || "Track",
+          fileId,
+        });
+      } catch {
+        /* skip missing / undecodable track */
+      }
+    }
+    if (typeof raw.playerIndex === "number") {
+      audioEngine.setPlayerIndex(raw.playerIndex);
+    }
+  }
+  audioEngine.applyRackBanks({
+    cueBanks: raw.cueBanks,
+    lineBanks: raw.lineBanks,
+    activeCueBankId: raw.activeCueBankId,
+    activeLineBankId: raw.activeLineBankId,
+  });
+  if (raw.channelRackName) audioEngine.setChannelRackName(raw.channelRackName);
+  if (raw.cueRackName) audioEngine.setCueRackName(raw.cueRackName);
   if (raw.masterEq) {
     for (const band of raw.masterEq) {
       audioEngine.setBusEq("master", band.id, {
@@ -102,6 +140,13 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
       /* device may be missing */
     }
   }
+  if (raw.phonesDeviceId) {
+    try {
+      await audioEngine.setPhonesOutputDevice(raw.phonesDeviceId);
+    } catch {
+      /* device may be missing */
+    }
+  }
 
   for (const cue of raw.cues) {
     const applyCueControls = (id: string) => {
@@ -112,9 +157,11 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
       if (typeof cue.monitor === "boolean") audioEngine.setCueMonitor(id, cue.monitor);
       audioEngine.setCueHotkey(id, cue.hotkey);
       audioEngine.setCuePad(id, typeof cue.pad === "number" ? cue.pad : null);
+      audioEngine.setCueMidiNote(id, typeof cue.midiNote === "number" ? cue.midiNote : null);
     };
     if (cue.builtin) {
       applyCueControls(cue.id);
+      if (cue.bankId) audioEngine.setCueBankId(cue.id, cue.bankId);
       continue;
     }
     if (cue.fileId && window.mixlineDesktop) {
@@ -126,20 +173,27 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
           fileId: cue.fileId,
           hotkey: cue.hotkey,
           pad: cue.pad,
+          midiNote: cue.midiNote,
           volume: cue.volume,
           muted: cue.muted,
           solo: cue.solo,
           toMix: cue.toMix,
           monitor: cue.monitor,
+          bankId: cue.bankId,
         });
       }
     } else {
       applyCueControls(cue.id);
     }
+    if (cue.bankId) audioEngine.setCueBankId(cue.id, cue.bankId);
   }
 
   const notes: string[] = [];
   await audioEngine.refreshDevices();
+
+  const placeBank = (id: string | undefined | void, bankId?: string) => {
+    if (id && bankId) audioEngine.setChannelBankId(id, bankId);
+  };
 
   for (const ch of raw.channels) {
     if (ch.kind === "mic") {
@@ -154,7 +208,10 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
           eq: ch.eq,
           fx: ch.fx,
           boostDb: ch.boostDb,
+          noiseCancel: ch.noiseCancel,
+          noiseGate: ch.noiseGate,
         });
+        placeBank(id, ch.bankId);
       } catch {
         notes.push("Saved mic couldn’t reopen — pick it again from Mic.");
       }
@@ -184,8 +241,9 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
           fx: ch.fx,
           boostDb: ch.boostDb,
         });
+        placeBank(id, ch.bankId);
       } catch {
-        audioEngine.addAppPlaceholder({
+        const placeholderId = audioEngine.addAppPlaceholder({
           name: ch.name,
           deviceId: ch.deviceId,
           deviceLabel: ch.deviceLabel || ch.name,
@@ -197,6 +255,7 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
           captureMode: "process",
           boostDb: ch.boostDb,
         });
+        placeBank(placeholderId, ch.bankId);
         notes.push(`Open “${ch.name}” and add it again — MixLine taps that app only.`);
       }
       continue;
@@ -217,8 +276,9 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
             fx: ch.fx,
             boostDb: ch.boostDb,
           });
+          placeBank(id, ch.bankId);
         } catch {
-          audioEngine.addAppPlaceholder({
+          const placeholderId = audioEngine.addAppPlaceholder({
             name: ch.name,
             deviceId: ch.deviceId,
             deviceLabel: ch.deviceLabel || ch.name,
@@ -229,10 +289,11 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
             eq: ch.eq,
             boostDb: ch.boostDb,
           });
+          placeBank(placeholderId, ch.bankId);
           notes.push(`Reconnect “${ch.name}” — pick its audio device on the strip.`);
         }
       } else {
-        audioEngine.addAppPlaceholder({
+        const placeholderId = audioEngine.addAppPlaceholder({
           name: ch.name,
           deviceId: ch.deviceId,
           deviceLabel: ch.deviceLabel || ch.name,
@@ -243,6 +304,7 @@ export async function restoreSetup(): Promise<{ restored: boolean; note?: string
           eq: ch.eq,
           boostDb: ch.boostDb,
         });
+        placeBank(placeholderId, ch.bankId);
         notes.push(
           `“${ch.name}” is saved but its audio device isn’t connected. Route that app to a virtual cable, then pick the device on the strip.`,
         );

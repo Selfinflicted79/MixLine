@@ -10,7 +10,9 @@ type VerticalFaderProps = {
   /** Pocket mixer: full-width slot, smaller cap, no dB scale. */
   dense?: boolean;
   /** Accent glow on the cap — PreSonus orange / X32 cyan vibes */
-  accent?: "cyan" | "orange" | "green" | "red";
+  accent?: "cyan" | "orange" | "green" | "red" | "magenta";
+  /** Double-click the fader (e.g. kill overlapping cue plays). */
+  onDoubleClick?: () => void;
 };
 
 const accents = {
@@ -38,6 +40,12 @@ const accents = {
     capBody: "linear-gradient(180deg, #ff8a7c 0%, #d04030 38%, #9a2418 62%, #5a1410 100%)",
     ridge: "rgba(255, 210, 200, 0.55)",
   },
+  magenta: {
+    fill: "linear-gradient(to top, #4a1050, #c44fd8 50%, #e8a0ff)",
+    glow: "0 0 12px rgba(255, 79, 216, 0.85)",
+    capBody: "linear-gradient(180deg, #e9a8ff 0%, #c44fd8 38%, #8a2aad 62%, #4a1050 100%)",
+    ridge: "rgba(255, 210, 250, 0.6)",
+  },
 };
 
 export function VerticalFader({
@@ -48,6 +56,7 @@ export function VerticalFader({
   className,
   dense = false,
   accent = "cyan",
+  onDoubleClick,
 }: VerticalFaderProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
@@ -152,6 +161,15 @@ export function VerticalFader({
             const ratio = 1 - (e.clientY - rect.top) / rect.height;
             onChange(Math.min(1, Math.max(0, ratio)));
           }}
+          onDoubleClick={(e) => {
+            if (disabled || !onDoubleClick) return;
+            e.preventDefault();
+            e.stopPropagation();
+            dragging.current = false;
+            setActive(false);
+            onDoubleClick();
+          }}
+          title={onDoubleClick ? `${label} — double-click to kill` : label}
           onKeyDown={(e) => {
             if (disabled) return;
             const step = e.shiftKey ? 0.1 : 0.02;
