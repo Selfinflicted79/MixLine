@@ -35,6 +35,18 @@ export type MixlineDesktopApi = {
   openSoundSettings: () => Promise<boolean>;
   openWidgetUrl: (url: string, browser?: "edge" | "chrome") => Promise<{ ok: boolean }>;
   listAudioApps: () => Promise<AudioAppInfo[]>;
+  getOutputVolume: (
+    deviceLabel?: string,
+  ) => Promise<{ volume: number; muted: boolean }>;
+  setOutputVolume: (
+    volume: number,
+    deviceLabel?: string,
+  ) => Promise<{ ok: boolean; volume: number }>;
+  setOutputMuted: (
+    muted: boolean,
+    deviceLabel?: string,
+  ) => Promise<{ ok: boolean; muted: boolean }>;
+  getOutputPeak: (deviceLabel?: string) => Promise<{ peak: number }>;
   startAppCapture: (pid: number) => Promise<{ id: string }>;
   stopAppCapture: (id: string) => Promise<boolean>;
   onAppPcm: (handler: (id: string, bytes: Uint8Array) => void) => () => void;

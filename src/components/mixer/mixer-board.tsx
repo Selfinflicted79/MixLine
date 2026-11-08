@@ -27,6 +27,7 @@ import {
   type MixerSnapshot,
 } from "@/lib/audio-engine";
 import { cloneDefaultEq } from "@/lib/eq-bands";
+import { FirstRunWizard } from "@/components/mixer/first-run-wizard";
 import { MpdAssignPanel } from "@/components/mixer/mpd-assign";
 import {
   faderControl,
@@ -48,6 +49,7 @@ import {
   saveCurrentSetup,
   syncHotkeys,
 } from "@/lib/setup-store";
+import { hasFinishedWizard } from "@/lib/wizard";
 import type { AudioAppInfo } from "@/vite-env";
 import { cn } from "cn";
 import bphLogo from "@/assets/bph-logo.png";
@@ -118,6 +120,8 @@ export function MixerBoard() {
   const [mpdMapOpen, setMpdMapOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<"eq" | "player">("eq");
   const [updateNote, setUpdateNote] = useState<string | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardForceTour, setWizardForceTour] = useState(false);
   const [, startTransition] = useTransition();
   const fileRef = useRef<HTMLInputElement>(null);
   const lastSavedJson = useRef("");
@@ -125,6 +129,15 @@ export function MixerBoard() {
   const midiSessionRef = useRef<MidiControllerSession | null>(null);
   const learnCueRef = useRef<string | null>(null);
   const [learnCueId, setLearnCueId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (hasFinishedWizard()) return;
+    const timer = window.setTimeout(() => {
+      setWizardForceTour(false);
+      setWizardOpen(true);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     setIsElectron(!!window.mixlineDesktop);
@@ -242,11 +255,90 @@ export function MixerBoard() {
     }
   }
 
+  /** Same source (Cue/Play) shares one key across racks; Mix is per-rack. */
+  function mpdSourceKey(control: MpdControl, lineBankId: string) {
+    if (control.kind === "none") return "none";
+    if (control.kind === "mix") return `mix:${lineBankId}`;
+    if (control.kind === "volume") return `vol:${control.id}`;
+    if (control.kind === "trim") return `trim:${control.id}`;
+    if (control.kind === "eq") return `eq:${control.bandId}`;
+    return control.kind;
+  }
+
+  function mpdSoftwareValue(control: MpdControl, state: MixerSnapshot) {
+    if (control.kind === "volume") {
+      return state.channels.find((item) => item.id === control.id)?.volume ?? 0;
+    }
+    if (control.kind === "trim") {
+      const boost = state.channels.find((item) => item.id === control.id)?.boostDb ?? 0;
+      return Math.min(1, Math.max(0, boost / 24));
+    }
+    if (control.kind === "cue") return state.cueMasterVolume;
+    if (control.kind === "play") return state.playerVolume;
+    if (control.kind === "mix") return state.masterVolume;
+    if (control.kind === "eq") {
+      const band = state.masterEq.find((item) => item.id === control.bandId);
+      return Math.min(1, Math.max(0, ((band?.gainDb ?? 0) + 12) / 24));
+    }
+    if (control.kind === "phones") return state.monitorVolume;
+    return 0;
+  }
+
+  type MidiPickup = { armed: boolean; lastMidi: number | null; lastApplied: number | null };
+  const midiPickupRef = useRef(new Map<string, MidiPickup>());
+  const snapRef = useRef(snap);
+  snapRef.current = snap;
+
+  useEffect(() => {
+    // New Mix source when the line rack changes — wait for the physical fader to catch up.
+    for (const [key, state] of midiPickupRef.current) {
+      if (key.startsWith("mix:")) state.armed = false;
+    }
+  }, [snap.activeLineBankId]);
+
+  function takeMidiPickup(control: MpdControl, midiValue: number) {
+    if (control.kind === "none") return false;
+    const state = snapRef.current;
+    const key = mpdSourceKey(control, state.activeLineBankId);
+    let pickup = midiPickupRef.current.get(key);
+    if (!pickup) {
+      pickup = { armed: false, lastMidi: null, lastApplied: null };
+      midiPickupRef.current.set(key, pickup);
+    }
+    const target = mpdSoftwareValue(control, state);
+
+    // Software moved without this fader (rack switch, Windows tray/headset) → re-arm pickup.
+    if (
+      pickup.armed &&
+      pickup.lastApplied != null &&
+      Math.abs(target - pickup.lastApplied) > 0.04 &&
+      Math.abs(midiValue - pickup.lastApplied) < 0.025
+    ) {
+      pickup.armed = false;
+    }
+
+    if (!pickup.armed) {
+      const near = Math.abs(midiValue - target) <= 0.035;
+      const crossed =
+        pickup.lastMidi != null && (pickup.lastMidi - target) * (midiValue - target) <= 0;
+      pickup.lastMidi = midiValue;
+      if (!near && !crossed) return false;
+      pickup.armed = true;
+    } else {
+      pickup.lastMidi = midiValue;
+    }
+    pickup.lastApplied = midiValue;
+    return true;
+  }
+
   function applyMpd(control: MpdControl, value: number) {
+    if (control.kind === "none") return;
+    if (!takeMidiPickup(control, value)) return;
     if (!bootedRef.current) void bootAndRestore();
     if (control.kind === "volume") audioEngine.setVolume(control.id, value);
     else if (control.kind === "trim") audioEngine.setBoost(control.id, value * 24);
     else if (control.kind === "cue") audioEngine.setCueMasterVolume(value);
+    else if (control.kind === "play") audioEngine.setPlayerVolume(value);
     else if (control.kind === "mix") audioEngine.setMasterVolume(value);
     else if (control.kind === "eq") {
       audioEngine.setBusEq("master", control.bandId, { gainDb: value * 24 - 12 });
@@ -254,12 +346,16 @@ export function MixerBoard() {
   }
 
   function muteMpd(control: MpdControl) {
+    if (control.kind === "none" || control.kind === "trim" || control.kind === "eq" || control.kind === "phones") {
+      return;
+    }
     if (control.kind === "volume") {
       const channel = snap.channels.find((item) => item.id === control.id);
       if (channel) audioEngine.setMuted(channel.id, !channel.muted);
       return;
     }
     if (control.kind === "cue") audioEngine.setCueMasterMuted(!snap.cueMasterMuted);
+    if (control.kind === "play") audioEngine.setPlayerMuted(!snap.playerMuted);
     if (control.kind === "mix") audioEngine.setMasterMuted(!snap.masterMuted);
   }
 
@@ -525,10 +621,22 @@ export function MixerBoard() {
               type="button"
               variant="outline"
               className="h-9 rounded-md border-white/10 bg-[color:var(--chip)] text-[color:var(--console-ink)]"
+              onClick={() => {
+                setWizardForceTour(true);
+                setWizardOpen(true);
+              }}
+              title="Replay the MixLine wizard"
+            >
+              Wizard
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-9 rounded-md border-white/10 bg-[color:var(--chip)] text-[color:var(--console-ink)]"
               onClick={() =>
                 void (async () => {
                   try {
-                    const result = await checkMixLineUpdate("0.2.29");
+                    const result = await checkMixLineUpdate("0.2.35");
                     if (!result.available) {
                       setUpdateNote("You're on the latest MixLine.");
                       return;
@@ -922,7 +1030,7 @@ export function MixerBoard() {
               subtitle={
                 snap.activeLineBankId === snap.lineBanks[0]?.id
                   ? `${snap.channelRackName} send`
-                  : `${snap.channelRackName} · ears`
+                  : `${snap.channelRackName} · Windows vol`
               }
               accent="green"
               volume={snap.masterVolume}
@@ -1109,6 +1217,15 @@ export function MixerBoard() {
           )}
         </DeviceDialog>
       ) : null}
+
+      <FirstRunWizard
+        open={wizardOpen}
+        forceTour={wizardForceTour}
+        onClose={() => {
+          setWizardOpen(false);
+          setWizardForceTour(false);
+        }}
+      />
     </div>
   );
 }
@@ -1196,7 +1313,7 @@ function EmptyRack({
       </p>
       <p className="max-w-sm text-sm text-[color:var(--console-muted)]">
         {listenRack
-          ? "PC / listen rack: set Mix send AND Phones to your headset. Mix is MixLine’s ear volume (Player/Cue MON + apps on this rack) — like turning your headset down, but only for MixLine, not every Windows app. Use Player MON for music; System capture will echo."
+          ? "PC / listen rack: set Mix send to your headset. The green Mix fader moves Windows volume for that device (the tray slider). Meter follows real output. Use Player MON for MixLine music; System capture will echo."
           : "Add a mic, app, or file for this rack. Route Mix send to wherever this bank should play — cable, headphones, TV, monitors, VR, and so on."}
       </p>
       <Button

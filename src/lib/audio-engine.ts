@@ -443,6 +443,17 @@ export class AudioEngine {
   private endedUnsub: (() => void) | null = null;
   private impulse: AudioBuffer | null = null;
   private pendingPcm = new Map<string, Uint8Array[]>();
+  /** Windows endpoint meter for PC / listen Mix (HyperX tray slider levels). */
+  private systemPeak = 0;
+  private systemRms = 0;
+  private systemPeakInflight = false;
+  private systemPeakClock = 0;
+  private systemVolumeTimer: ReturnType<typeof setTimeout> | null = null;
+  private systemMuteTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Ignore OS→UI volume echo while we are writing Windows volume from MixLine. */
+  private systemVolumeIgnoreUntil = 0;
+  private systemVolumeInflight = false;
+  private systemVolumeClock = 0;
 
   subscribe(fn: (snap: MixerSnapshot) => void) {
     this.listeners.add(fn);
@@ -856,6 +867,7 @@ export class AudioEngine {
     this.channelRackName = bank.name;
     if (this.ctx && this.mixBus) this.ensureLineBankOutput(bank.id);
     this.emit();
+    void this.syncListenMixFromWindows();
     return true;
   }
 
@@ -877,6 +889,42 @@ export class AudioEngine {
     this.activeLineBankId = next.id;
     this.channelRackName = next.name;
     this.emit();
+    if (next.id !== this.primaryLineBankId()) {
+      void this.syncListenMixFromWindows();
+    }
+  }
+
+  /** Label Windows uses for the listen Mix send (or default device). */
+  listenOutputLabel() {
+    const bank = this.getActiveLineBank();
+    const id = bank?.mixDeviceId || this.phonesDeviceId || "";
+    if (!id) return "";
+    return this.outputDevices.find((d) => d.deviceId === id)?.label ?? "";
+  }
+
+  async syncListenMixFromWindows() {
+    if (!window.mixlineDesktop?.getOutputVolume) return;
+    if (this.isPrimaryLineBank()) return;
+    try {
+      const state = await window.mixlineDesktop.getOutputVolume(this.listenOutputLabel());
+      const bank = this.getActiveLineBank();
+      if (!bank || bank.id === this.primaryLineBankId()) return;
+      let changed = false;
+      if (typeof state.volume === "number") {
+        const next = Math.min(1, Math.max(0, state.volume));
+        if (Math.abs(next - (bank.volume ?? 0)) > 0.008) {
+          bank.volume = next;
+          changed = true;
+        }
+      }
+      if (typeof state.muted === "boolean" && state.muted !== bank.muted) {
+        bank.muted = state.muted;
+        changed = true;
+      }
+      if (changed) this.emit();
+    } catch {
+      /* helper missing / device gone */
+    }
   }
 
   private primaryLineBankId() {
@@ -1643,6 +1691,8 @@ export class AudioEngine {
   }
 
   private updateMeters() {
+    this.pollWindowsOutputPeak();
+    this.pollWindowsOutputVolume();
     const t = this.ctx?.currentTime ?? 0;
     for (const ch of this.channels.values()) {
       if (ch.noiseGateGain && ch.noiseSense && ch.noiseSenseData) {
@@ -1906,21 +1956,12 @@ export class AudioEngine {
       if (bank.id === this.primaryLineBankId()) continue;
       const out = this.lineBankOutputs.get(bank.id);
       if (!out) continue;
-      out.gain.gain.setTargetAtTime(
-        bank.muted ? 0 : (bank.volume ?? 0.85),
-        t,
-        0.015,
-      );
+      // Listen Mix owns Windows device volume — keep MixLine bank path at unity.
+      out.gain.gain.setTargetAtTime(1, t, 0.015);
     }
     if (this.monitorGain) {
-      const listen = this.getActiveLineBank();
-      const earsMuted =
-        !!listen && listen.id !== this.primaryLineBankId() && !!listen.muted;
-      this.monitorGain.gain.setTargetAtTime(
-        earsMuted ? 0 : this.monitorVolume,
-        t,
-        0.015,
-      );
+      // MON path stays unity on listen racks; PC Mix moves the OS headset slider instead.
+      this.monitorGain.gain.setTargetAtTime(this.monitorVolume, t, 0.015);
     }
     if (this.mixToMonitor) {
       this.mixToMonitor.gain.setTargetAtTime(this.monitorMix ? 1 : 0, t, 0.015);
@@ -2567,14 +2608,20 @@ export class AudioEngine {
       // Stream rack Mix = Discord/OBS send level only.
       this.masterVolume = next;
     } else {
-      // PC / listen rack Mix = ear volume (Player/Cue MON + apps on this rack).
-      this.monitorVolume = next;
-      if (this.monitorGain) {
-        this.monitorGain.gain.setTargetAtTime(
-          bank.muted ? 0 : next,
-          this.ctx?.currentTime ?? 0,
-          0.02,
-        );
+      // PC / listen rack Mix = Windows headset/speakers volume (tray slider).
+      const label = this.listenOutputLabel();
+      if (window.mixlineDesktop?.setOutputVolume) {
+        this.systemVolumeIgnoreUntil = performance.now() + 450;
+        if (this.systemVolumeTimer) clearTimeout(this.systemVolumeTimer);
+        this.systemVolumeTimer = setTimeout(() => {
+          this.systemVolumeTimer = null;
+          this.systemVolumeIgnoreUntil = performance.now() + 350;
+          void window.mixlineDesktop
+            ?.setOutputVolume(next, label)
+            .catch(() => {
+              /* keep UI value even if OS set fails */
+            });
+        }, 40);
       }
     }
     this.applyRouting();
@@ -2586,6 +2633,17 @@ export class AudioEngine {
     if (bank) bank.muted = muted;
     if (!bank || bank.id === this.primaryLineBankId()) {
       this.masterMuted = muted;
+    } else if (window.mixlineDesktop?.setOutputMuted) {
+      const label = this.listenOutputLabel();
+      this.systemVolumeIgnoreUntil = performance.now() + 450;
+      if (this.systemMuteTimer) clearTimeout(this.systemMuteTimer);
+      this.systemMuteTimer = setTimeout(() => {
+        this.systemMuteTimer = null;
+        this.systemVolumeIgnoreUntil = performance.now() + 350;
+        void window.mixlineDesktop?.setOutputMuted(muted, label).catch(() => {
+          /* ignore */
+        });
+      }, 40);
     }
     this.applyRouting();
     this.emit();
@@ -2593,12 +2651,83 @@ export class AudioEngine {
 
   private activeMasterPeak() {
     if (this.isPrimaryLineBank()) return this.masterPeak;
-    return this.lineBankOutputs.get(this.activeLineBankId)?.peak ?? 0;
+    return Math.max(
+      this.systemPeak,
+      this.lineBankOutputs.get(this.activeLineBankId)?.peak ?? 0,
+      this.playerPeak * (this.playerMonitor ? 1 : 0),
+    );
   }
 
   private activeMasterRms() {
     if (this.isPrimaryLineBank()) return this.masterRms;
-    return this.lineBankOutputs.get(this.activeLineBankId)?.rms ?? 0;
+    return Math.max(
+      this.systemRms,
+      this.lineBankOutputs.get(this.activeLineBankId)?.rms ?? 0,
+      this.playerRms * (this.playerMonitor ? 1 : 0),
+    );
+  }
+
+  private pollWindowsOutputPeak() {
+    if (this.isPrimaryLineBank()) return;
+    if (!window.mixlineDesktop?.getOutputPeak) return;
+    if (this.systemPeakInflight) return;
+    this.systemPeakClock += 1;
+    if (this.systemPeakClock % 2 !== 0) return;
+    this.systemPeakInflight = true;
+    void window.mixlineDesktop
+      .getOutputPeak(this.listenOutputLabel())
+      .then((result) => {
+        const peak = Math.min(1, Math.max(0, Number(result.peak) || 0));
+        this.systemPeak = Math.max(peak, this.systemPeak * this.peakHoldDecay);
+        this.systemRms = this.systemRms * 0.7 + peak * 0.3;
+      })
+      .catch(() => {
+        this.systemPeak *= this.peakHoldDecay;
+        this.systemRms *= 0.85;
+      })
+      .finally(() => {
+        this.systemPeakInflight = false;
+      });
+  }
+
+  /** Keep PC Mix fader locked to Windows tray/headset/keyboard volume. Stream Mix untouched. */
+  private pollWindowsOutputVolume() {
+    if (this.isPrimaryLineBank()) return;
+    if (!window.mixlineDesktop?.getOutputVolume) return;
+    if (this.systemVolumeTimer) return;
+    if (performance.now() < this.systemVolumeIgnoreUntil) return;
+    if (this.systemVolumeInflight) return;
+    this.systemVolumeClock += 1;
+    if (this.systemVolumeClock % 4 !== 0) return;
+    this.systemVolumeInflight = true;
+    void window.mixlineDesktop
+      .getOutputVolume(this.listenOutputLabel())
+      .then((state) => {
+        if (this.isPrimaryLineBank()) return;
+        if (this.systemVolumeTimer) return;
+        if (performance.now() < this.systemVolumeIgnoreUntil) return;
+        const bank = this.getActiveLineBank();
+        if (!bank || bank.id === this.primaryLineBankId()) return;
+        let changed = false;
+        if (typeof state.volume === "number") {
+          const next = Math.min(1, Math.max(0, state.volume));
+          if (Math.abs(next - (bank.volume ?? 0)) > 0.008) {
+            bank.volume = next;
+            changed = true;
+          }
+        }
+        if (typeof state.muted === "boolean" && state.muted !== bank.muted) {
+          bank.muted = state.muted;
+          changed = true;
+        }
+        if (changed) this.emit();
+      })
+      .catch(() => {
+        /* helper missing / device gone */
+      })
+      .finally(() => {
+        this.systemVolumeInflight = false;
+      });
   }
 
   removeChannel(id: string) {

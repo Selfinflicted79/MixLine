@@ -44,9 +44,11 @@ const GENERIC_KNOBS = [
 const GENERIC_SWITCHES = [28, 29, 30, 31];
 
 export type MpdControl =
+  | { kind: "none" }
   | { kind: "volume"; id: string }
   | { kind: "trim"; id: string }
   | { kind: "cue" }
+  | { kind: "play" }
   | { kind: "mix" }
   | { kind: "eq"; bandId: string }
   | { kind: "phones" };
@@ -61,12 +63,13 @@ const EQ_BANDS = [
 ] as const;
 
 export type MpdAssign = {
-  /** Left two sliders. Cue and Mix stay on the right two. */
-  faders: [string, string];
+  /** Sliders 1–3 are customizable. Slider 4 is always Mix for the active rack. */
+  faders: [string, string, string];
   knobs: [string, string, string, string];
 };
 
 export function encodeControl(control: MpdControl) {
+  if (control.kind === "none") return "";
   if (control.kind === "volume") return `vol:${control.id}`;
   if (control.kind === "trim") return `trim:${control.id}`;
   if (control.kind === "eq") return `eq:${control.bandId}`;
@@ -74,11 +77,30 @@ export function encodeControl(control: MpdControl) {
 }
 
 export function decodeControl(raw: string): MpdControl | null {
-  if (raw === "cue" || raw === "mix" || raw === "phones") return { kind: raw };
+  if (!raw || raw === "none") return { kind: "none" };
+  if (raw === "cue" || raw === "play" || raw === "mix" || raw === "phones") {
+    return { kind: raw };
+  }
   if (raw.startsWith("vol:")) return { kind: "volume", id: raw.slice(4) };
   if (raw.startsWith("trim:")) return { kind: "trim", id: raw.slice(5) };
   if (raw.startsWith("eq:")) return { kind: "eq", bandId: raw.slice(3) };
   return null;
+}
+
+/** Drop duplicate slider targets so two physical faders can't fight (e.g. Play twice). */
+export function uniquifyFaders(faders: [string, string, string]): [string, string, string] {
+  const next: [string, string, string] = ["", "", ""];
+  const used = new Set<string>();
+  for (let i = 0; i < 3; i++) {
+    const raw = faders[i] ?? "";
+    if (!raw || used.has(raw)) {
+      next[i] = "";
+      continue;
+    }
+    used.add(raw);
+    next[i] = raw;
+  }
+  return next;
 }
 
 export function loadMpdAssign(): MpdAssign {
@@ -87,16 +109,19 @@ export function loadMpdAssign(): MpdAssign {
     const faders = parsed.faders;
     const knobs = parsed.knobs;
     return {
-      faders: [faders?.[0] ?? "", faders?.[1] ?? ""],
+      faders: uniquifyFaders([faders?.[0] ?? "", faders?.[1] ?? "", faders?.[2] ?? "play"]),
       knobs: [knobs?.[0] ?? "", knobs?.[1] ?? "", knobs?.[2] ?? "", knobs?.[3] ?? ""],
     };
   } catch {
-    return { faders: ["", ""], knobs: ["", "", "", ""] };
+    return { faders: ["", "", "play"], knobs: ["", "", "", ""] };
   }
 }
 
 export function saveMpdAssign(assign: MpdAssign) {
-  localStorage.setItem(ASSIGN_KEY, JSON.stringify(assign));
+  localStorage.setItem(
+    ASSIGN_KEY,
+    JSON.stringify({ ...assign, faders: uniquifyFaders(assign.faders) }),
+  );
 }
 
 export function loadMidiDevice(): string {
@@ -120,15 +145,21 @@ function liveInputs(channels: NamedChannel[]) {
   return channels.filter((channel) => channel.kind !== "desktop");
 }
 
-/** Slider 1 and 2 follow the saved pick. Slider 3 is Cue, slider 4 is Mix. */
+/** Sliders 1–3 follow the saved pick (empty = None). Slider 4 is always Mix. */
 export function faderControl(index: number, assign: MpdAssign, channels: NamedChannel[]): MpdControl {
-  if (index === 2) return { kind: "cue" };
   if (index >= 3) return { kind: "mix" };
-  const saved = decodeControl(assign.faders[index] ?? "");
+  const raw = assign.faders[index] ?? "";
+  if (!raw) return { kind: "none" };
+  for (let i = 0; i < index; i++) {
+    if ((assign.faders[i] ?? "") === raw) return { kind: "none" };
+  }
+  const saved = decodeControl(raw);
+  if (saved?.kind === "none") return saved;
   if (saved?.kind === "volume" && channels.some((channel) => channel.id === saved.id)) return saved;
-  const inputs = liveInputs(channels);
-  const channel = inputs[index] ?? inputs[0];
-  return channel ? { kind: "volume", id: channel.id } : { kind: "cue" };
+  if (saved?.kind === "cue" || saved?.kind === "play" || saved?.kind === "mix" || saved?.kind === "phones") {
+    return saved;
+  }
+  return { kind: "none" };
 }
 
 const KNOB_FALLBACK: MpdControl[] = [
@@ -152,7 +183,14 @@ export function knobControl(index: number, assign: MpdAssign, channels: NamedCha
 }
 
 export function faderChoices(channels: NamedChannel[]) {
-  return channels.map((channel) => ({ value: `vol:${channel.id}`, label: channel.name }));
+  return [
+    { value: "", label: "None" },
+    ...channels.map((channel) => ({ value: `vol:${channel.id}`, label: channel.name })),
+    { value: "play", label: "Play" },
+    { value: "cue", label: "Cue" },
+    { value: "mix", label: "Mix" },
+    { value: "phones", label: "Phones" },
+  ];
 }
 
 export function knobChoices(channels: NamedChannel[]) {
@@ -161,6 +199,7 @@ export function knobChoices(channels: NamedChannel[]) {
       { value: `vol:${channel.id}`, label: `${channel.name} level` },
       { value: `trim:${channel.id}`, label: `${channel.name} trim` },
     ]),
+    { value: "play", label: "Play" },
     { value: "cue", label: "Cue" },
     { value: "mix", label: "Mix" },
     { value: "phones", label: "Phones" },
@@ -169,7 +208,9 @@ export function knobChoices(channels: NamedChannel[]) {
 }
 
 export function controlLabel(control: MpdControl, channels: NamedChannel[]) {
+  if (control.kind === "none") return "None";
   if (control.kind === "cue") return "Cue";
+  if (control.kind === "play") return "Play";
   if (control.kind === "mix") return "Mix";
   if (control.kind === "phones") return "Phones";
   if (control.kind === "eq") return EQ_BANDS.find((band) => band.id === control.bandId)?.label ?? "EQ";

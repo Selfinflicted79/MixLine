@@ -11,6 +11,8 @@
 #include <audioclient.h>
 #include <audioclientactivationparams.h>
 #include <audiopolicy.h>
+#include <endpointvolume.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <tlhelp32.h>
 #include <winver.h>
 #include <ksmedia.h>
@@ -676,9 +678,227 @@ static int List() {
   return 0;
 }
 
+static std::wstring NormalizeDeviceNeedle(const wchar_t* raw) {
+  if (!raw) return L"";
+  std::wstring s(raw);
+  auto strip = [&](const wchar_t* prefix) {
+    size_t n = wcslen(prefix);
+    if (s.size() >= n && _wcsnicmp(s.c_str(), prefix, n) == 0) s = s.substr(n);
+  };
+  strip(L"Default - ");
+  strip(L"Default – ");
+  strip(L"Communications - ");
+  strip(L"Communications – ");
+  while (!s.empty() && (s.front() == L' ' || s.front() == L'\t')) s.erase(s.begin());
+  return s;
+}
+
+static HRESULT FindRenderDevice(IMMDeviceEnumerator* en, const wchar_t* needle, IMMDevice** out) {
+  *out = nullptr;
+  std::wstring want = NormalizeDeviceNeedle(needle);
+  if (want.empty()) {
+    return en->GetDefaultAudioEndpoint(eRender, eConsole, out);
+  }
+
+  IMMDeviceCollection* devices = nullptr;
+  HRESULT hr = en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &devices);
+  if (FAILED(hr)) return hr;
+  UINT count = 0;
+  devices->GetCount(&count);
+  IMMDevice* fallback = nullptr;
+  for (UINT i = 0; i < count; i++) {
+    IMMDevice* device = nullptr;
+    if (FAILED(devices->Item(i, &device)) || !device) continue;
+    IPropertyStore* props = nullptr;
+    if (FAILED(device->OpenPropertyStore(STGM_READ, &props)) || !props) {
+      device->Release();
+      continue;
+    }
+    PROPVARIANT name;
+    PropVariantInit(&name);
+    std::wstring friendly;
+    if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &name)) && name.vt == VT_LPWSTR && name.pwszVal) {
+      friendly = name.pwszVal;
+    }
+    PropVariantClear(&name);
+    props->Release();
+
+    if (!friendly.empty() && friendly.find(want) != std::wstring::npos) {
+      *out = device;
+      if (fallback) fallback->Release();
+      devices->Release();
+      return S_OK;
+    }
+    if (!fallback) fallback = device;
+    else device->Release();
+  }
+  devices->Release();
+  if (fallback) {
+    *out = fallback;
+    return S_OK;
+  }
+  return en->GetDefaultAudioEndpoint(eRender, eConsole, out);
+}
+
+static int VolumeGet(const wchar_t* needle) {
+  HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  const bool com = SUCCEEDED(hr) || hr == S_FALSE;
+  IMMDeviceEnumerator* en = nullptr;
+  hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                        reinterpret_cast<void**>(&en));
+  if (FAILED(hr)) {
+    if (com) CoUninitialize();
+    Fail("Could not create device enumerator", hr);
+  }
+  IMMDevice* device = nullptr;
+  hr = FindRenderDevice(en, needle, &device);
+  en->Release();
+  if (FAILED(hr) || !device) {
+    if (com) CoUninitialize();
+    Fail("Could not find output device", hr);
+  }
+  IAudioEndpointVolume* vol = nullptr;
+  hr = device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&vol));
+  device->Release();
+  if (FAILED(hr) || !vol) {
+    if (com) CoUninitialize();
+    Fail("Could not open endpoint volume", hr);
+  }
+  float level = 0.f;
+  BOOL muted = FALSE;
+  vol->GetMasterVolumeLevelScalar(&level);
+  vol->GetMute(&muted);
+  vol->Release();
+  std::printf("{\"volume\":%.4f,\"muted\":%s}\n", level, muted ? "true" : "false");
+  std::fflush(stdout);
+  if (com) CoUninitialize();
+  return 0;
+}
+
+static int VolumeSet(float level, const wchar_t* needle) {
+  if (level < 0.f) level = 0.f;
+  if (level > 1.f) level = 1.f;
+  HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  const bool com = SUCCEEDED(hr) || hr == S_FALSE;
+  IMMDeviceEnumerator* en = nullptr;
+  hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                        reinterpret_cast<void**>(&en));
+  if (FAILED(hr)) {
+    if (com) CoUninitialize();
+    Fail("Could not create device enumerator", hr);
+  }
+  IMMDevice* device = nullptr;
+  hr = FindRenderDevice(en, needle, &device);
+  en->Release();
+  if (FAILED(hr) || !device) {
+    if (com) CoUninitialize();
+    Fail("Could not find output device", hr);
+  }
+  IAudioEndpointVolume* vol = nullptr;
+  hr = device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&vol));
+  device->Release();
+  if (FAILED(hr) || !vol) {
+    if (com) CoUninitialize();
+    Fail("Could not open endpoint volume", hr);
+  }
+  hr = vol->SetMasterVolumeLevelScalar(level, nullptr);
+  vol->Release();
+  if (FAILED(hr)) {
+    if (com) CoUninitialize();
+    Fail("Could not set volume", hr);
+  }
+  std::printf("{\"ok\":true,\"volume\":%.4f}\n", level);
+  std::fflush(stdout);
+  if (com) CoUninitialize();
+  return 0;
+}
+
+static int VolumeMute(bool muted, const wchar_t* needle) {
+  HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  const bool com = SUCCEEDED(hr) || hr == S_FALSE;
+  IMMDeviceEnumerator* en = nullptr;
+  hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                        reinterpret_cast<void**>(&en));
+  if (FAILED(hr)) {
+    if (com) CoUninitialize();
+    Fail("Could not create device enumerator", hr);
+  }
+  IMMDevice* device = nullptr;
+  hr = FindRenderDevice(en, needle, &device);
+  en->Release();
+  if (FAILED(hr) || !device) {
+    if (com) CoUninitialize();
+    Fail("Could not find output device", hr);
+  }
+  IAudioEndpointVolume* vol = nullptr;
+  hr = device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&vol));
+  device->Release();
+  if (FAILED(hr) || !vol) {
+    if (com) CoUninitialize();
+    Fail("Could not open endpoint volume", hr);
+  }
+  hr = vol->SetMute(muted ? TRUE : FALSE, nullptr);
+  vol->Release();
+  if (FAILED(hr)) {
+    if (com) CoUninitialize();
+    Fail("Could not set mute", hr);
+  }
+  std::printf("{\"ok\":true,\"muted\":%s}\n", muted ? "true" : "false");
+  std::fflush(stdout);
+  if (com) CoUninitialize();
+  return 0;
+}
+
+static int VolumePeak(const wchar_t* needle) {
+  HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  const bool com = SUCCEEDED(hr) || hr == S_FALSE;
+  IMMDeviceEnumerator* en = nullptr;
+  hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                        reinterpret_cast<void**>(&en));
+  if (FAILED(hr)) {
+    if (com) CoUninitialize();
+    Fail("Could not create device enumerator", hr);
+  }
+  IMMDevice* device = nullptr;
+  hr = FindRenderDevice(en, needle, &device);
+  en->Release();
+  if (FAILED(hr) || !device) {
+    if (com) CoUninitialize();
+    Fail("Could not find output device", hr);
+  }
+  IAudioMeterInformation* meter = nullptr;
+  hr = device->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&meter));
+  device->Release();
+  if (FAILED(hr) || !meter) {
+    if (com) CoUninitialize();
+    Fail("Could not open endpoint meter", hr);
+  }
+  float peak = 0.f;
+  meter->GetPeakValue(&peak);
+  meter->Release();
+  std::printf("{\"peak\":%.4f}\n", peak);
+  std::fflush(stdout);
+  if (com) CoUninitialize();
+  return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
   if (argc >= 2 && wcscmp(argv[1], L"--list") == 0) return List();
   if (argc >= 3 && wcscmp(argv[1], L"--capture") == 0) return Capture(static_cast<DWORD>(_wtoi(argv[2])));
-  std::fprintf(stderr, "usage: mixline-capture --list | --capture <pid>\n");
+  if (argc >= 2 && wcscmp(argv[1], L"--volume-get") == 0) {
+    return VolumeGet(argc >= 3 ? argv[2] : L"");
+  }
+  if (argc >= 3 && wcscmp(argv[1], L"--volume-set") == 0) {
+    return VolumeSet(static_cast<float>(_wtof(argv[2])), argc >= 4 ? argv[3] : L"");
+  }
+  if (argc >= 3 && wcscmp(argv[1], L"--volume-mute") == 0) {
+    return VolumeMute(_wtoi(argv[2]) != 0, argc >= 4 ? argv[3] : L"");
+  }
+  if (argc >= 2 && wcscmp(argv[1], L"--volume-peak") == 0) {
+    return VolumePeak(argc >= 3 ? argv[2] : L"");
+  }
+  std::fprintf(
+      stderr,
+      "usage: mixline-capture --list | --capture <pid> | --volume-get [name] | --volume-set <0-1> [name] | --volume-mute <0|1> [name] | --volume-peak [name]\n");
   return 2;
 }

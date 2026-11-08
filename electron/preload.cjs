@@ -14,6 +14,12 @@ contextBridge.exposeInMainWorld("mixlineDesktop", {
   openSoundSettings: () => ipcRenderer.invoke("mixline:open-sound-settings"),
   openWidgetUrl: (url, browser) => ipcRenderer.invoke("mixline:open-widget-url", url, browser),
   listAudioApps: () => ipcRenderer.invoke("mixline:list-audio-apps"),
+  getOutputVolume: (deviceLabel) => ipcRenderer.invoke("mixline:get-output-volume", deviceLabel),
+  setOutputVolume: (volume, deviceLabel) =>
+    ipcRenderer.invoke("mixline:set-output-volume", volume, deviceLabel),
+  setOutputMuted: (muted, deviceLabel) =>
+    ipcRenderer.invoke("mixline:set-output-muted", muted, deviceLabel),
+  getOutputPeak: (deviceLabel) => ipcRenderer.invoke("mixline:get-output-peak", deviceLabel),
   startAppCapture: (pid) => ipcRenderer.invoke("mixline:start-app-capture", pid),
   stopAppCapture: (id) => ipcRenderer.invoke("mixline:stop-app-capture", id),
   onAppPcm: (handler) => {

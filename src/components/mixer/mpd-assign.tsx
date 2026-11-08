@@ -1,5 +1,4 @@
 import {
-  controlLabel,
   encodeControl,
   faderChoices,
   faderControl,
@@ -7,6 +6,7 @@ import {
   knobControl,
   MIDI_AUTO,
   MIDI_SHARE,
+  uniquifyFaders,
   type MpdAssign,
   type MpdStatus,
 } from "@/lib/mpd226";
@@ -43,10 +43,15 @@ export function MpdAssignPanel({
         ? midi.preferred
         : MIDI_AUTO;
 
-  function setFader(index: 0 | 1, value: string) {
+  function setFader(index: 0 | 1 | 2, value: string) {
     const next: MpdAssign["faders"] = [...assign.faders];
+    if (value) {
+      for (let i = 0; i < 3; i++) {
+        if (i !== index && next[i] === value) next[i] = "";
+      }
+    }
     next[index] = value;
-    onChange({ ...assign, faders: next });
+    onChange({ ...assign, faders: uniquifyFaders(next) });
   }
 
   function setKnob(index: 0 | 1 | 2 | 3, value: string) {
@@ -102,8 +107,13 @@ export function MpdAssignPanel({
           options={sliders}
           onChange={(value) => setFader(1, value)}
         />
-        <LockedRow n={3} label="Cue" />
-        <LockedRow n={4} label="Mix" />
+        <PickRow
+          n={3}
+          value={encodeControl(faderControl(2, assign, named))}
+          options={sliders}
+          onChange={(value) => setFader(2, value)}
+        />
+        <LockedRow n={4} label="Mix (active rack)" />
       </div>
       <p className="mt-3 text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
         Knobs
@@ -120,8 +130,9 @@ export function MpdAssignPanel({
         ))}
       </div>
       <p className="mt-2 text-[9px] leading-snug text-[color:var(--console-muted)]">
-        Buttons under the sliders mute that slider’s strip.{" "}
-        {controlLabel(knobControl(0, assign, named), named)} is knob 1.
+        Each target on one slider only. Cue/Play are the same level on every rack; Mix is per rack
+        (soft pickup after you switch). Slider 3 defaults to Play; 4 is Mix. Empty = None.
+        Buttons under the sliders mute that strip.
       </p>
     </div>
   );

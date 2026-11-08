@@ -525,17 +525,17 @@ app.whenReady().then(() => {
     return { ok: true };
   });
 
-  ipcMain.handle("mixline:list-audio-apps", async () => {
+  function runCaptureHelper(args, timeoutMs = 8000) {
     const exe = captureHelperPath();
     if (!fs.existsSync(exe)) throw new Error("App capture helper is missing.");
-    const result = await new Promise((resolve, reject) => {
-      const proc = spawn(exe, ["--list"], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    return new Promise((resolve, reject) => {
+      const proc = spawn(exe, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
       const out = [];
       const err = [];
       const timer = setTimeout(() => {
         proc.kill();
-        reject(new Error("Listing apps timed out."));
-      }, 8000);
+        reject(new Error("Audio helper timed out."));
+      }, timeoutMs);
       proc.stdout.on("data", (chunk) => out.push(chunk));
       proc.stderr.on("data", (chunk) => err.push(chunk));
       proc.on("error", (error) => {
@@ -547,22 +547,62 @@ app.whenReady().then(() => {
         const stdout = Buffer.concat(out).toString("utf8").trim();
         const stderr = Buffer.concat(err).toString("utf8").trim();
         if (code !== 0) {
-          reject(new Error(stderr || `Could not list apps (${code}).`));
+          reject(new Error(stderr || `Audio helper failed (${code}).`));
           return;
         }
         resolve(stdout);
       });
     });
-    const start = result.indexOf("[");
-    if (start < 0) return [];
-    const apps = JSON.parse(result.slice(start));
+  }
+
+  function parseHelperJson(stdout) {
+    const startObj = stdout.indexOf("{");
+    const startArr = stdout.indexOf("[");
+    const start =
+      startObj < 0 ? startArr : startArr < 0 ? startObj : Math.min(startObj, startArr);
+    if (start < 0) throw new Error("Audio helper returned no JSON.");
+    return JSON.parse(stdout.slice(start));
+  }
+
+  ipcMain.handle("mixline:list-audio-apps", async () => {
+    const result = await runCaptureHelper(["--list"]);
+    const apps = parseHelperJson(result);
     if (!Array.isArray(apps)) return [];
     // Don't offer MixLine itself — capturing our output into a listen rack echoes.
     return apps.filter((app) => {
-      const exe = String(app?.exe || "");
+      const appExe = String(app?.exe || "");
       const name = String(app?.name || "");
-      return !/mixline/i.test(exe) && !/mixline/i.test(name);
+      return !/mixline/i.test(appExe) && !/mixline/i.test(name);
     });
+  });
+
+  ipcMain.handle("mixline:get-output-volume", async (_e, deviceLabel) => {
+    const label = typeof deviceLabel === "string" ? deviceLabel : "";
+    const args = label ? ["--volume-get", label] : ["--volume-get"];
+    return parseHelperJson(await runCaptureHelper(args, 4000));
+  });
+
+  ipcMain.handle("mixline:set-output-volume", async (_e, volume, deviceLabel) => {
+    const level = Math.min(1, Math.max(0, Number(volume) || 0));
+    const label = typeof deviceLabel === "string" ? deviceLabel : "";
+    const args = label
+      ? ["--volume-set", String(level), label]
+      : ["--volume-set", String(level)];
+    return parseHelperJson(await runCaptureHelper(args, 4000));
+  });
+
+  ipcMain.handle("mixline:set-output-muted", async (_e, muted, deviceLabel) => {
+    const label = typeof deviceLabel === "string" ? deviceLabel : "";
+    const args = label
+      ? ["--volume-mute", muted ? "1" : "0", label]
+      : ["--volume-mute", muted ? "1" : "0"];
+    return parseHelperJson(await runCaptureHelper(args, 4000));
+  });
+
+  ipcMain.handle("mixline:get-output-peak", async (_e, deviceLabel) => {
+    const label = typeof deviceLabel === "string" ? deviceLabel : "";
+    const args = label ? ["--volume-peak", label] : ["--volume-peak"];
+    return parseHelperJson(await runCaptureHelper(args, 4000));
   });
 
   ipcMain.handle("mixline:start-app-capture", async (_e, pid) => {
