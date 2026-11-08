@@ -17,6 +17,8 @@ export type MpdStatus = {
   preferred: string;
   devices: MidiDeviceOption[];
   shareAvailable: boolean;
+  /** Physical fader count learned from the controller (4–8). */
+  faderCount: number;
 };
 
 const SHARE_URL = "ws://127.0.0.1:18726/";
@@ -31,17 +33,21 @@ const LIVELITE_NOTES = [60, 62, 64, 65, 67, 69, 71, 72, 74, 76, 77, 79, 81, 83, 
 const DRUM_NOTES = [37, 36, 42, 82, 40, 38, 46, 44, 48, 47, 45, 43, 49, 55, 51, 53];
 const STUDIO_NOTES = [47, 48, 49, 50, 43, 44, 45, 46, 39, 40, 41, 42, 35, 36, 37, 38];
 
+/** Up to 8 sliders for bigger surfaces; MPD226 uses the first 4. */
+export const MAX_MIDI_FADERS = 8;
+export const MIN_MIDI_FADERS = 4;
+
 const GENERIC_FADERS = [
-  [20, 21, 22, 23],
-  [61, 62, 63, 70],
-  [92, 93, 94, 95],
+  [20, 21, 22, 23, 24, 25, 26, 27],
+  [61, 62, 63, 70, 71, 72, 73, 74],
+  [92, 93, 94, 95, 96, 97, 98, 99],
 ];
 const GENERIC_KNOBS = [
   [3, 9, 14, 15],
   [52, 53, 54, 55],
   [83, 85, 86, 87],
 ];
-const GENERIC_SWITCHES = [28, 29, 30, 31];
+const GENERIC_SWITCHES = [28, 29, 30, 31, 32, 33, 34, 35];
 
 export type MpdControl =
   | { kind: "none" }
@@ -63,15 +69,66 @@ const EQ_BANDS = [
 ] as const;
 
 export type MpdAssign = {
-  /** Sliders 1–3 are customizable. Slider 4 is always Mix for the active rack. */
-  faders: [string, string, string];
+  /**
+   * Customizable slider targets (stable refs). Length up to MAX_MIDI_FADERS-1;
+   * the last physical slider is always Mix for the active rack.
+   */
+  faders: string[];
   knobs: [string, string, string, string];
+  /** Last known physical slider count (4–8). */
+  faderCount: number;
 };
 
-export function encodeControl(control: MpdControl) {
+type NamedChannel = {
+  id: string;
+  name: string;
+  kind: string;
+  deviceId?: string;
+};
+
+/** Survives relaunch — channel ids are regenerated, names/deviceIds are not. */
+export function volumeRef(channel: NamedChannel) {
+  return `volref:${channel.kind}|${channel.name}|${channel.deviceId ?? ""}`;
+}
+
+export function trimRef(channel: NamedChannel) {
+  return `trimref:${channel.kind}|${channel.name}|${channel.deviceId ?? ""}`;
+}
+
+function resolveNamedChannel(raw: string, channels: NamedChannel[]) {
+  if (raw.startsWith("vol:") || raw.startsWith("trim:")) {
+    const id = raw.slice(raw.indexOf(":") + 1);
+    return channels.find((channel) => channel.id === id) ?? null;
+  }
+  if (!raw.startsWith("volref:") && !raw.startsWith("trimref:")) return null;
+  const tag = raw.slice(raw.indexOf(":") + 1);
+  const [kind, name, ...deviceParts] = tag.split("|");
+  const deviceId = deviceParts.join("|");
+  return (
+    channels.find(
+      (channel) =>
+        channel.kind === kind &&
+        channel.name === name &&
+        (channel.deviceId ?? "") === deviceId,
+    ) ||
+    channels.find(
+      (channel) => channel.name === name && (!deviceId || (channel.deviceId ?? "") === deviceId),
+    ) ||
+    channels.find((channel) => channel.name.toLowerCase() === (name || "").toLowerCase()) ||
+    null
+  );
+}
+
+export function encodeControl(control: MpdControl, channels: NamedChannel[] = []) {
   if (control.kind === "none") return "";
-  if (control.kind === "volume") return `vol:${control.id}`;
-  if (control.kind === "trim") return `trim:${control.id}`;
+  if (control.kind === "volume") {
+    const channel = channels.find((item) => item.id === control.id);
+    return channel ? volumeRef(channel) : `vol:${control.id}`;
+  }
+  if (control.kind === "trim") {
+    const channel = channels.find((item) => item.id === control.id);
+    return channel ? trimRef(channel) : `trim:${control.id}`;
+  }
   if (control.kind === "eq") return `eq:${control.bandId}`;
   return control.kind;
 }
@@ -81,24 +138,40 @@ export function decodeControl(raw: string): MpdControl | null {
   if (raw === "cue" || raw === "play" || raw === "mix" || raw === "phones") {
     return { kind: raw };
   }
-  if (raw.startsWith("vol:")) return { kind: "volume", id: raw.slice(4) };
-  if (raw.startsWith("trim:")) return { kind: "trim", id: raw.slice(5) };
   if (raw.startsWith("eq:")) return { kind: "eq", bandId: raw.slice(3) };
+  if (raw.startsWith("vol:") || raw.startsWith("volref:")) return { kind: "volume", id: raw };
+  if (raw.startsWith("trim:") || raw.startsWith("trimref:")) return { kind: "trim", id: raw };
   return null;
 }
 
+function clampFaderCount(value: number | undefined) {
+  if (!Number.isFinite(value)) return MIN_MIDI_FADERS;
+  return Math.min(MAX_MIDI_FADERS, Math.max(MIN_MIDI_FADERS, Math.round(value!)));
+}
+
+function padFaders(faders: string[] | undefined, playDefault = true): string[] {
+  const slots = MAX_MIDI_FADERS - 1;
+  const next = Array.from({ length: slots }, (_, i) => faders?.[i] ?? "");
+  if (playDefault && next.every((slot) => !slot) && !faders?.length) {
+    next[2] = "play";
+  } else if (playDefault && (faders?.length ?? 0) < 3 && !next[2]) {
+    // Keep historical default: slider 3 = Play when unset.
+    if (!(faders && faders.length >= 3)) next[2] = next[2] || "play";
+  }
+  return next;
+}
+
 /** Drop duplicate slider targets so two physical faders can't fight (e.g. Play twice). */
-export function uniquifyFaders(faders: [string, string, string]): [string, string, string] {
-  const next: [string, string, string] = ["", "", ""];
+export function uniquifyFaders(faders: string[]): string[] {
+  const next = padFaders(faders, false);
   const used = new Set<string>();
-  for (let i = 0; i < 3; i++) {
-    const raw = faders[i] ?? "";
+  for (let i = 0; i < next.length; i++) {
+    const raw = next[i] ?? "";
     if (!raw || used.has(raw)) {
       next[i] = "";
       continue;
     }
     used.add(raw);
-    next[i] = raw;
   }
   return next;
 }
@@ -108,19 +181,30 @@ export function loadMpdAssign(): MpdAssign {
     const parsed = JSON.parse(localStorage.getItem(ASSIGN_KEY) ?? "") as Partial<MpdAssign>;
     const faders = parsed.faders;
     const knobs = parsed.knobs;
+    const loaded = padFaders(
+      Array.isArray(faders) ? faders : [faders?.[0] ?? "", faders?.[1] ?? "", faders?.[2] ?? "play"],
+      true,
+    );
+    // Historical default: empty board → slider 3 Play.
+    if (!loaded[2] && !(Array.isArray(faders) && faders[2] === "")) loaded[2] = loaded[2] || "play";
     return {
-      faders: uniquifyFaders([faders?.[0] ?? "", faders?.[1] ?? "", faders?.[2] ?? "play"]),
+      faders: uniquifyFaders(loaded),
       knobs: [knobs?.[0] ?? "", knobs?.[1] ?? "", knobs?.[2] ?? "", knobs?.[3] ?? ""],
+      faderCount: clampFaderCount(parsed.faderCount),
     };
   } catch {
-    return { faders: ["", "", "play"], knobs: ["", "", "", ""] };
+    return { faders: padFaders(["", "", "play"]), knobs: ["", "", "", ""], faderCount: MIN_MIDI_FADERS };
   }
 }
 
 export function saveMpdAssign(assign: MpdAssign) {
   localStorage.setItem(
     ASSIGN_KEY,
-    JSON.stringify({ ...assign, faders: uniquifyFaders(assign.faders) }),
+    JSON.stringify({
+      ...assign,
+      faders: uniquifyFaders(assign.faders),
+      faderCount: clampFaderCount(assign.faderCount),
+    }),
   );
 }
 
@@ -139,25 +223,30 @@ export function saveMidiDevice(id: string) {
   localStorage.setItem(DEVICE_KEY, id);
 }
 
-type NamedChannel = { id: string; name: string; kind: string };
-
 function liveInputs(channels: NamedChannel[]) {
   return channels.filter((channel) => channel.kind !== "desktop");
 }
 
-/** Sliders 1–3 follow the saved pick (empty = None). Slider 4 is always Mix. */
+export function assignableFaderCount(faderCount: number) {
+  return Math.max(1, clampFaderCount(faderCount) - 1);
+}
+
+/** Customizable slots follow the saved pick. The last physical slider is always Mix. */
 export function faderControl(index: number, assign: MpdAssign, channels: NamedChannel[]): MpdControl {
-  if (index >= 3) return { kind: "mix" };
+  const count = clampFaderCount(assign.faderCount);
+  if (index >= count - 1) return { kind: "mix" };
+  if (index < 0 || index >= assignableFaderCount(count)) return { kind: "none" };
   const raw = assign.faders[index] ?? "";
   if (!raw) return { kind: "none" };
   for (let i = 0; i < index; i++) {
     if ((assign.faders[i] ?? "") === raw) return { kind: "none" };
   }
-  const saved = decodeControl(raw);
-  if (saved?.kind === "none") return saved;
-  if (saved?.kind === "volume" && channels.some((channel) => channel.id === saved.id)) return saved;
-  if (saved?.kind === "cue" || saved?.kind === "play" || saved?.kind === "mix" || saved?.kind === "phones") {
-    return saved;
+  if (raw === "cue" || raw === "play" || raw === "mix" || raw === "phones") {
+    return { kind: raw };
+  }
+  if (raw.startsWith("vol:") || raw.startsWith("volref:")) {
+    const channel = resolveNamedChannel(raw, channels);
+    return channel ? { kind: "volume", id: channel.id } : { kind: "none" };
   }
   return { kind: "none" };
 }
@@ -170,11 +259,19 @@ const KNOB_FALLBACK: MpdControl[] = [
 ];
 
 export function knobControl(index: number, assign: MpdAssign, channels: NamedChannel[]): MpdControl {
-  const saved = decodeControl(assign.knobs[index] ?? "");
-  if (saved?.kind === "volume" || saved?.kind === "trim") {
-    if (channels.some((channel) => channel.id === saved.id)) return saved;
-  } else if (saved) {
-    return saved;
+  const raw = assign.knobs[index] ?? "";
+  if (raw === "cue" || raw === "play" || raw === "mix" || raw === "phones") {
+    return { kind: raw };
+  }
+  if (raw.startsWith("eq:")) return { kind: "eq", bandId: raw.slice(3) };
+  if (raw.startsWith("vol:") || raw.startsWith("volref:")) {
+    const channel = resolveNamedChannel(raw, channels);
+    if (channel) return { kind: "volume", id: channel.id };
+  } else if (raw.startsWith("trim:") || raw.startsWith("trimref:")) {
+    const channel = resolveNamedChannel(raw, channels);
+    if (channel) return { kind: "trim", id: channel.id };
+  } else if (raw) {
+    return { kind: "none" };
   }
   const inputs = liveInputs(channels);
   const channel = inputs[index];
@@ -185,7 +282,7 @@ export function knobControl(index: number, assign: MpdAssign, channels: NamedCha
 export function faderChoices(channels: NamedChannel[]) {
   return [
     { value: "", label: "None" },
-    ...channels.map((channel) => ({ value: `vol:${channel.id}`, label: channel.name })),
+    ...channels.map((channel) => ({ value: volumeRef(channel), label: channel.name })),
     { value: "play", label: "Play" },
     { value: "cue", label: "Cue" },
     { value: "mix", label: "Mix" },
@@ -196,8 +293,8 @@ export function faderChoices(channels: NamedChannel[]) {
 export function knobChoices(channels: NamedChannel[]) {
   return [
     ...channels.flatMap((channel) => [
-      { value: `vol:${channel.id}`, label: `${channel.name} level` },
-      { value: `trim:${channel.id}`, label: `${channel.name} trim` },
+      { value: volumeRef(channel), label: `${channel.name} level` },
+      { value: trimRef(channel), label: `${channel.name} trim` },
     ]),
     { value: "play", label: "Play" },
     { value: "cue", label: "Cue" },
@@ -217,6 +314,17 @@ export function controlLabel(control: MpdControl, channels: NamedChannel[]) {
   const channel = channels.find((item) => item.id === control.id);
   const name = channel?.name ?? "Missing strip";
   return control.kind === "trim" ? `${name} trim` : name;
+}
+
+export function faderSelectValue(index: number, assign: MpdAssign, channels: NamedChannel[]) {
+  const raw = assign.faders[index] ?? "";
+  if (!raw) return "";
+  if (raw === "cue" || raw === "play" || raw === "mix" || raw === "phones") return raw;
+  if (raw.startsWith("volref:") || raw.startsWith("vol:")) {
+    const channel = resolveNamedChannel(raw, channels);
+    return channel ? volumeRef(channel) : "";
+  }
+  return raw;
 }
 
 /** Map a note to pad slots 0–15 for known MPD226 factory layouts. */
@@ -249,7 +357,7 @@ function shortName(name: string) {
   return name.length > 22 ? `${name.slice(0, 20)}…` : name;
 }
 
-export function startMpd226(handlers: MpdHandlers) {
+export function startMpd226(handlers: MpdHandlers & { initialFaderCount?: number }) {
   let stopped = false;
   let preferred = handlers.preferred || MIDI_AUTO;
   let access: MIDIAccess | null = null;
@@ -260,7 +368,11 @@ export function startMpd226(handlers: MpdHandlers) {
   let controls: Controls = "livelite";
   let liveliteFaders = false;
   let genericFaders = false;
-  const switchHigh = [false, false, false, false];
+  let maxFaderSeen = Math.max(
+    MIN_MIDI_FADERS - 1,
+    clampFaderCount(handlers.initialFaderCount) - 1,
+  );
+  const switchHigh = Array.from({ length: MAX_MIDI_FADERS }, () => false);
   const bound = new Set<MIDIInput>();
 
   function deviceList(): MidiDeviceOption[] {
@@ -300,7 +412,17 @@ export function startMpd226(handlers: MpdHandlers) {
       preferred,
       devices,
       shareAvailable: shareSeen || shareLive,
+      faderCount: Math.min(MAX_MIDI_FADERS, Math.max(MIN_MIDI_FADERS, maxFaderSeen + 1)),
     });
+  }
+
+  function emitFader(index: number, value: number) {
+    if (index < 0 || index >= MAX_MIDI_FADERS) return;
+    if (index > maxFaderSeen) {
+      maxFaderSeen = index;
+      publish();
+    }
+    handlers.onFader(index, value);
   }
 
   function feedShare(text: string) {
@@ -342,7 +464,7 @@ export function startMpd226(handlers: MpdHandlers) {
       if (cc === 2 || cc === 4 || cc === 5) controls = "reason";
       if (cc === 40 || cc === 41 || cc === 50 || cc === 51) controls = "bitwig";
       if (cc === 33 || cc === 34 || cc === 17 || cc === 18) controls = "protools";
-      if ((cc === 7 || cc === 10) && channel >= 1 && channel <= 4 && controls !== "generic") {
+      if ((cc === 7 || cc === 10) && channel >= 1 && channel <= 8 && controls !== "generic") {
         controls = "cubase";
       }
     }
@@ -356,34 +478,34 @@ export function startMpd226(handlers: MpdHandlers) {
       return;
     }
     if (controls === "cubase") {
-      if (cc === 7 && channel >= 1 && channel <= 4) handlers.onFader(channel - 1, value);
-      if (cc === 10 && channel >= 1 && channel <= 4) handlers.onKnob(channel - 1, value);
+      if (cc === 7 && channel >= 1 && channel <= 8) emitFader(channel - 1, value);
+      if (cc === 10 && channel >= 1 && channel <= 8) handlers.onKnob(channel - 1, value);
       return;
     }
     if (controls === "livelite") {
-      const fader = [12, 13, 14, 15].indexOf(cc);
-      if (fader >= 0) handlers.onFader(fader, value);
+      const fader = [12, 13, 14, 15, 16, 17, 18, 19].indexOf(cc);
+      if (fader >= 0) emitFader(fader, value);
       const knob = [22, 23, 24, 25].indexOf(cc);
       if (knob >= 0) handlers.onKnob(knob, value);
       return;
     }
     if (controls === "reason") {
-      const fader = [12, 13, 14, 15].indexOf(cc);
-      if (fader >= 0) handlers.onFader(fader, value);
+      const fader = [12, 13, 14, 15, 16, 17, 18, 19].indexOf(cc);
+      if (fader >= 0) emitFader(fader, value);
       const knob = [2, 3, 4, 5].indexOf(cc);
       if (knob >= 0) handlers.onKnob(knob, value);
       return;
     }
     if (controls === "bitwig") {
-      const fader = [40, 41, 42, 43].indexOf(cc);
-      if (fader >= 0) handlers.onFader(fader, value);
+      const fader = [40, 41, 42, 43, 44, 45, 46, 47].indexOf(cc);
+      if (fader >= 0) emitFader(fader, value);
       const knob = [50, 51, 52, 53].indexOf(cc);
       if (knob >= 0) handlers.onKnob(knob, value);
       return;
     }
     if (controls === "protools") {
-      const fader = [33, 34, 35, 36].indexOf(cc);
-      if (fader >= 0) handlers.onFader(fader, value);
+      const fader = [33, 34, 35, 36, 37, 38, 39, 40].indexOf(cc);
+      if (fader >= 0) emitFader(fader, value);
       const knob = [17, 18, 19, 20].indexOf(cc);
       if (knob >= 0) handlers.onKnob(knob, value);
       return;
@@ -391,7 +513,7 @@ export function startMpd226(handlers: MpdHandlers) {
 
     for (const row of GENERIC_FADERS) {
       const index = row.indexOf(cc);
-      if (index >= 0) handlers.onFader(index, value);
+      if (index >= 0) emitFader(index, value);
     }
     for (const row of GENERIC_KNOBS) {
       const index = row.indexOf(cc);

@@ -112,6 +112,7 @@ export function DiscordRoute({
             variant="outline"
             className="btn-lit h-8 bg-[color:var(--chip)] px-2.5 text-[10px] text-[color:var(--console-ink)]"
             onClick={onRefresh}
+            title="Rescan outputs and reconnect OBS / YouTube / missing sources"
           >
             Refresh
           </Button>

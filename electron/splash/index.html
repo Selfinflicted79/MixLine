@@ -85,6 +85,27 @@
         box-shadow: 0 0 10px #5fd36a;
         animation: blink 1s ease-in-out infinite;
       }
+      .unmute {
+        position: absolute;
+        z-index: 3;
+        bottom: 0.85rem;
+        right: 0.85rem;
+        display: none;
+        -webkit-app-region: no-drag;
+        border: 1px solid rgba(77, 232, 255, 0.35);
+        border-radius: 0.3rem;
+        background: rgba(10, 12, 18, 0.9);
+        color: #4de8ff;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        padding: 0.45rem 0.7rem;
+        cursor: pointer;
+      }
+      .unmute.show {
+        display: inline-flex;
+      }
       @keyframes rise {
         from {
           opacity: 0;
@@ -108,7 +129,8 @@
   </head>
   <body>
     <div class="stage">
-      <video id="clip" muted playsinline preload="auto" autoplay></video>
+      <video id="clip" playsinline preload="auto" autoplay></video>
+      <button type="button" class="unmute" id="unmute">Enable sound</button>
       <div class="card" id="card">
         <p class="eyebrow">Badly Played Hub</p>
         <p class="title">MixLine</p>
@@ -119,12 +141,19 @@
     <script>
       const video = document.getElementById("clip");
       const card = document.getElementById("card");
+      const unmute = document.getElementById("unmute");
       let finished = false;
       let titleHold = false;
 
       function finish() {
         if (finished) return;
         finished = true;
+        try {
+          video.pause();
+          video.muted = true;
+        } catch {
+          /* ignore */
+        }
         if (window.splash && typeof window.splash.done === "function") {
           window.splash.done();
         }
@@ -133,6 +162,7 @@
       function showTitleCard() {
         if (titleHold) return;
         titleHold = true;
+        unmute.classList.remove("show");
         video.style.display = "none";
         card.classList.add("show");
         setTimeout(finish, 900);
@@ -142,9 +172,32 @@
       const fromQuery = params.get("video");
       const fallback = new URL("./DevLoadingScreen.mp4", window.location.href).href;
       video.src = fromQuery || fallback;
+      video.muted = false;
+      video.volume = 1;
       video.addEventListener("ended", showTitleCard, { once: true });
       video.addEventListener("error", showTitleCard, { once: true });
-      void video.play().catch(() => showTitleCard());
+
+      void video
+        .play()
+        .then(() => {
+          unmute.classList.remove("show");
+        })
+        .catch(() => {
+          video.muted = true;
+          void video
+            .play()
+            .then(() => {
+              unmute.classList.add("show");
+            })
+            .catch(() => showTitleCard());
+        });
+
+      unmute.addEventListener("click", () => {
+        video.muted = false;
+        video.volume = 1;
+        void video.play();
+        unmute.classList.remove("show");
+      });
 
       setTimeout(() => {
         if (!finished && !titleHold) showTitleCard();

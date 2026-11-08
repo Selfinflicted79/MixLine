@@ -18,6 +18,9 @@ const { spawn } = require("child_process");
 const isDev = !app.isPackaged;
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:4317";
 
+// Splash intro can play video audio without a click when Chromium allows it.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
 /** @type {BrowserWindow | null} */

@@ -1,6 +1,6 @@
 {
   "name": "mixline",
-  "version": "0.2.35",
+  "version": "0.3.2",
   "private": true,
   "description": "A small desktop mixing board for mic, PC, and app audio",
   "author": "MixLine",

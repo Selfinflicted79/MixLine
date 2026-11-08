@@ -7,6 +7,7 @@ import {
   Monitor,
   Plus,
   Radio,
+  RefreshCw,
   Save,
   Upload,
   X,
@@ -49,6 +50,7 @@ import {
   saveCurrentSetup,
   syncHotkeys,
 } from "@/lib/setup-store";
+import { playChannelSeatWave, playCueSeatWave, playPowerSequence } from "@/lib/ui-sfx";
 import { hasFinishedWizard } from "@/lib/wizard";
 import type { AudioAppInfo } from "@/vite-env";
 import { cn } from "cn";
@@ -97,6 +99,7 @@ export function MixerBoard() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
+  const [seatWave, setSeatWave] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [audioApps, setAudioApps] = useState<AudioAppInfo[]>([]);
   const [appsError, setAppsError] = useState<string | null>(null);
@@ -115,6 +118,7 @@ export function MixerBoard() {
     preferred: loadMidiDevice(),
     devices: [],
     shareAvailable: false,
+    faderCount: 4,
   });
   const [mpdAssign, setMpdAssign] = useState<MpdAssign>(() => loadMpdAssign());
   const [mpdMapOpen, setMpdMapOpen] = useState(false);
@@ -239,14 +243,20 @@ export function MixerBoard() {
   }
 
   async function bootAndRestore() {
+    if (started || busy === "boot") return;
     setError(null);
     setBusy("boot");
+    playPowerSequence();
     try {
       await bootIfNeeded();
       if (!bootedRef.current) {
         bootedRef.current = true;
         const result = await restoreSetup();
         if (result.note) setError(result.note);
+        const seated = audioEngine.snapshot();
+        setSeatWave((wave) => wave + 1);
+        playCueSeatWave(seated.cues.length);
+        playChannelSeatWave(seated.channels.length);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start audio.");
@@ -397,7 +407,16 @@ export function MixerBoard() {
   useEffect(() => {
     const session = startMpd226({
       preferred: loadMidiDevice(),
-      onStatus: setMpd,
+      initialFaderCount: loadMpdAssign().faderCount,
+      onStatus: (status) => {
+        setMpd(status);
+        setMpdAssign((prev) => {
+          if ((status.faderCount || 4) <= (prev.faderCount || 4)) return prev;
+          const next = { ...prev, faderCount: status.faderCount };
+          saveMpdAssign(next);
+          return next;
+        });
+      },
       onNote: (note) => midiRef.current.note(note),
       onFader: (index, value) => midiRef.current.fader(index, value),
       onKnob: (index, value) => midiRef.current.knob(index, value),
@@ -636,7 +655,7 @@ export function MixerBoard() {
               onClick={() =>
                 void (async () => {
                   try {
-                    const result = await checkMixLineUpdate("0.2.35");
+                    const result = await checkMixLineUpdate("0.3.2");
                     if (!result.available) {
                       setUpdateNote("You're on the latest MixLine.");
                       return;
@@ -679,7 +698,22 @@ export function MixerBoard() {
 
         <DiscordRoute
           snap={snap}
-          onRefresh={() => void runAction("refresh", () => audioEngine.refreshOutputDevices())}
+          onRefresh={() =>
+            void runAction("refresh", async () => {
+              await audioEngine.refreshOutputDevices();
+              const result = await audioEngine.refreshChannelSources();
+              if (result.recovered > 0) {
+                setError(null);
+                setUpdateNote(
+                  result.stillMissing.length
+                    ? `Reconnected ${result.recovered}. Still waiting: ${result.stillMissing.join(", ")}.`
+                    : `Reconnected ${result.recovered} source${result.recovered === 1 ? "" : "s"}.`,
+                );
+              } else if (result.stillMissing.length) {
+                setUpdateNote(`Still missing: ${result.stillMissing.join(", ")}. Start the app, then Refresh.`);
+              }
+            })
+          }
           onSelectSend={(id) =>
             void runAction("sink", () => audioEngine.setDiscordOutputDevice(id))
           }
@@ -694,6 +728,7 @@ export function MixerBoard() {
           cues={snap.cues}
           rackName={snap.cueRackName}
           started={started}
+          seatWave={seatWave}
           bankIndex={Math.max(
             0,
             snap.cueBanks.findIndex((b) => b.id === snap.activeCueBankId),
@@ -814,7 +849,10 @@ export function MixerBoard() {
               {mpdMapOpen ? (
                 <MpdAssignPanel
                   channels={snap.channels}
-                  assign={mpdAssign}
+                  assign={{
+                    ...mpdAssign,
+                    faderCount: Math.max(mpdAssign.faderCount || 4, mpd.faderCount || 4),
+                  }}
                   midi={mpd}
                   onChange={(next) => {
                     setMpdAssign(next);
@@ -827,6 +865,32 @@ export function MixerBoard() {
                   onRefresh={() => midiSessionRef.current?.refresh()}
                 />
               ) : null}
+              <SourceButton
+                icon={RefreshCw}
+                label="Refresh"
+                busy={busy === "sources"}
+                title="Find OBS, YouTube, mics, and devices that weren’t running at boot"
+                onClick={() =>
+                  void runAction("sources", async () => {
+                    await audioEngine.refreshOutputDevices();
+                    const result = await audioEngine.refreshChannelSources();
+                    if (result.recovered > 0) {
+                      setError(null);
+                      setUpdateNote(
+                        result.stillMissing.length
+                          ? `Reconnected ${result.recovered}. Still waiting: ${result.stillMissing.join(", ")}.`
+                          : `Reconnected ${result.recovered} source${result.recovered === 1 ? "" : "s"}.`,
+                      );
+                    } else if (result.stillMissing.length) {
+                      setUpdateNote(
+                        `Still missing: ${result.stillMissing.join(", ")}. Start the app, then Refresh again.`,
+                      );
+                    } else {
+                      setUpdateNote("Sources refreshed.");
+                    }
+                  })
+                }
+              />
               <SourceButton
                 icon={Mic}
                 label="Mic"
@@ -893,9 +957,13 @@ export function MixerBoard() {
                 onAddMic={() => void openMicPicker()}
               />
             ) : (
-              snap.channels.map((channel) => (
-                <ChannelStrip
+              snap.channels.map((channel, index) => (
+                <div
                   key={channel.id}
+                  className="strip-seat"
+                  style={{ animationDelay: `${Math.min(index, 10) * 55}ms` }}
+                >
+                <ChannelStrip
                   channel={channel}
                   anySolo={snap.anySolo}
                   eqMode={eqChannelId === channel.id}
@@ -970,6 +1038,7 @@ export function MixerBoard() {
                   }
                   onResetFx={() => audioEngine.resetChannelFx(channel.id)}
                 />
+                </div>
               ))
             )}
 
@@ -1276,11 +1345,13 @@ function SourceButton({
   label,
   onClick,
   busy,
+  title,
 }: {
   icon: typeof Mic;
   label: string;
   onClick: () => void;
   busy?: boolean;
+  title?: string;
 }) {
   return (
     <Button
@@ -1288,6 +1359,7 @@ function SourceButton({
       variant="outline"
       disabled={busy}
       onClick={onClick}
+      title={title}
       className={cn(
         "h-8 rounded-md border-[color:var(--console-edge)] bg-[color:var(--chip)] px-2.5 text-xs text-[color:var(--console-ink)] hover:bg-[color:var(--chip-hover)]",
         busy && "opacity-70",

@@ -1,7 +1,8 @@
 import {
+  assignableFaderCount,
   encodeControl,
   faderChoices,
-  faderControl,
+  faderSelectValue,
   knobChoices,
   knobControl,
   MIDI_AUTO,
@@ -33,7 +34,10 @@ export function MpdAssignPanel({
     id: channel.id,
     name: channel.name,
     kind: channel.kind,
+    deviceId: channel.deviceId,
   }));
+  const faderCount = Math.max(assign.faderCount || 4, midi.faderCount || 4);
+  const customSlots = assignableFaderCount(faderCount);
   const sliders = faderChoices(named);
   const knobs = knobChoices(named);
   const deviceValue =
@@ -43,21 +47,26 @@ export function MpdAssignPanel({
         ? midi.preferred
         : MIDI_AUTO;
 
-  function setFader(index: 0 | 1 | 2, value: string) {
-    const next: MpdAssign["faders"] = [...assign.faders];
+  function setFader(index: number, value: string) {
+    const next = [...assign.faders];
+    while (next.length < customSlots) next.push("");
     if (value) {
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < next.length; i++) {
         if (i !== index && next[i] === value) next[i] = "";
       }
     }
     next[index] = value;
-    onChange({ ...assign, faders: uniquifyFaders(next) });
+    onChange({
+      ...assign,
+      faders: uniquifyFaders(next),
+      faderCount,
+    });
   }
 
   function setKnob(index: 0 | 1 | 2 | 3, value: string) {
     const next: MpdAssign["knobs"] = [...assign.knobs];
     next[index] = value;
-    onChange({ ...assign, knobs: next });
+    onChange({ ...assign, knobs: next, faderCount });
   }
 
   return (
@@ -88,32 +97,23 @@ export function MpdAssignPanel({
         ))}
       </select>
       <p className="mt-1 text-[9px] leading-snug text-[color:var(--console-muted)]">
-        Pick any MIDI pad. MPD226 maps still work. Use Learn on a cue for other controllers.
+        Pick any MIDI pad. Move every slider once so MixLine can learn how many you have (up to 8).
       </p>
 
       <p className="mt-3 text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
-        Sliders
+        Sliders · {faderCount}
       </p>
       <div className="mt-1.5 grid grid-cols-[1.4rem_1fr] items-center gap-1.5">
-        <PickRow
-          n={1}
-          value={encodeControl(faderControl(0, assign, named))}
-          options={sliders}
-          onChange={(value) => setFader(0, value)}
-        />
-        <PickRow
-          n={2}
-          value={encodeControl(faderControl(1, assign, named))}
-          options={sliders}
-          onChange={(value) => setFader(1, value)}
-        />
-        <PickRow
-          n={3}
-          value={encodeControl(faderControl(2, assign, named))}
-          options={sliders}
-          onChange={(value) => setFader(2, value)}
-        />
-        <LockedRow n={4} label="Mix (active rack)" />
+        {Array.from({ length: customSlots }, (_, index) => (
+          <PickRow
+            key={index}
+            n={index + 1}
+            value={faderSelectValue(index, { ...assign, faderCount }, named)}
+            options={sliders}
+            onChange={(value) => setFader(index, value)}
+          />
+        ))}
+        <LockedRow n={faderCount} label="Mix (active rack)" />
       </div>
       <p className="mt-3 text-[10px] font-bold tracking-[0.14em] text-[color:var(--console-muted)] uppercase">
         Knobs
@@ -123,16 +123,15 @@ export function MpdAssignPanel({
           <PickRow
             key={index}
             n={index + 1}
-            value={encodeControl(knobControl(index, assign, named))}
+            value={encodeControl(knobControl(index, assign, named), named)}
             options={knobs}
             onChange={(value) => setKnob(index, value)}
           />
         ))}
       </div>
       <p className="mt-2 text-[9px] leading-snug text-[color:var(--console-muted)]">
-        Each target on one slider only. Cue/Play are the same level on every rack; Mix is per rack
-        (soft pickup after you switch). Slider 3 defaults to Play; 4 is Mix. Empty = None.
-        Buttons under the sliders mute that strip.
+        Strip picks (OBS, YouTube, etc.) stick by name after reboot. Last slider stays Mix. One
+        target per slider.
       </p>
     </div>
   );

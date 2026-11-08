@@ -13,6 +13,7 @@ type SoundboardProps = {
   cues: CuePad[];
   rackName: string;
   started?: boolean;
+  seatWave?: number;
   bankIndex?: number;
   bankCount?: number;
   canAddBank?: boolean;
@@ -42,6 +43,7 @@ export function Soundboard({
   cues,
   rackName,
   started = false,
+  seatWave = 0,
   bankIndex = 0,
   bankCount = 1,
   canAddBank = false,
@@ -234,10 +236,15 @@ export function Soundboard({
               data-cue-card
               className={cn(
                 "strip-face relative flex min-w-[6.4rem] flex-col gap-1.5 rounded-sm px-1.5 py-2",
+                started && seatWave === 0 && "strip-seat-hold",
+                seatWave > 0 && "strip-seat",
                 dimmed && dragId !== cue.id && "opacity-45",
                 dragId === cue.id && "opacity-60",
               )}
-              style={{ boxShadow: "inset 3px 0 0 #e8a23a" }}
+              style={{
+                boxShadow: "inset 3px 0 0 #e8a23a",
+                animationDelay: seatWave > 0 ? `${Math.min(index, 10) * 55}ms` : undefined,
+              }}
             >
               <button
                 type="button"

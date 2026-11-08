@@ -2312,28 +2312,17 @@ export class AudioEngine {
     }
   }
 
-  /**
-   * OBS-style app tap: only this process (and its children). Game and other apps stay out.
-   * MIX still sends the strip to the selected output (VB-Cable).
-   */
-  async addAppProcess(app: { pid: number; name: string; exe: string }) {
-    await this.ensureRunning();
+  private async attachProcessCapture(
+    channel: ChannelNodes,
+    app: { pid: number; name: string; exe: string },
+  ) {
     if (!this.ctx) throw new Error("Engine not ready");
     if (!window.mixlineDesktop?.startAppCapture) {
       throw new Error("Per-app capture only works in the MixLine desktop app.");
     }
     this.ensurePcmListener();
+    this.detachSource(channel);
     const { id: captureId } = await window.mixlineDesktop.startAppCapture(app.pid);
-    const channel = this.createChannelShell("app", app.name, {
-      captureMode: "process",
-      toMix: true,
-      deviceId: `proc:${app.exe}`,
-      deviceLabel: app.name,
-    });
-    if (!channel) {
-      await window.mixlineDesktop.stopAppCapture(captureId);
-      throw new Error("Engine not ready");
-    }
     const ring = new PcmRing();
     const pump = this.ctx.createScriptProcessor(2048, 1, 2);
     pump.onaudioprocess = (event) => {
@@ -2349,6 +2338,10 @@ export class AudioEngine {
     channel.pcmRing = ring;
     channel.pcmKeepAlive = keepAlive;
     channel.captureId = captureId;
+    channel.deviceId = `proc:${app.exe}`;
+    channel.deviceLabel = app.name || channel.deviceLabel || channel.name;
+    channel.captureMode = "process";
+    channel.needsReconnect = false;
     channel.connected = true;
     const queued = this.pendingPcm.get(captureId);
     if (queued) {
@@ -2357,7 +2350,112 @@ export class AudioEngine {
     }
     this.applyRouting();
     this.emit();
+  }
+
+  /**
+   * OBS-style app tap: only this process (and its children). Game and other apps stay out.
+   * MIX still sends the strip to the selected output (VB-Cable).
+   */
+  async addAppProcess(app: { pid: number; name: string; exe: string }) {
+    await this.ensureRunning();
+    if (!this.ctx) throw new Error("Engine not ready");
+    if (!window.mixlineDesktop?.startAppCapture) {
+      throw new Error("Per-app capture only works in the MixLine desktop app.");
+    }
+    const channel = this.createChannelShell("app", app.name, {
+      captureMode: "process",
+      toMix: true,
+      deviceId: `proc:${app.exe}`,
+      deviceLabel: app.name,
+    });
+    if (!channel) throw new Error("Engine not ready");
+    try {
+      await this.attachProcessCapture(channel, app);
+    } catch (err) {
+      this.removeChannel(channel.id);
+      throw err;
+    }
     return channel.id;
+  }
+
+  /** Re-open OBS / YouTube / other saved app strips after they launch later. */
+  async refreshChannelSources() {
+    await this.refreshDevices();
+    let recovered = 0;
+    const stillMissing: string[] = [];
+    const apps =
+      window.mixlineDesktop?.listAudioApps != null
+        ? await window.mixlineDesktop.listAudioApps().catch(() => [])
+        : [];
+
+    for (const channel of [...this.channels.values()]) {
+      const wants =
+        channel.needsReconnect ||
+        (!channel.connected && (channel.kind === "app" || channel.kind === "mic"));
+      if (!wants) continue;
+
+      if (channel.kind === "app" && channel.captureMode === "process") {
+        const exe = (channel.deviceId || "").replace(/^proc:/, "").split(":")[0] || "";
+        const match =
+          apps.find(
+            (app) =>
+              exe &&
+              app.exe.toLowerCase() === exe.toLowerCase() &&
+              app.name.toLowerCase() === channel.name.toLowerCase(),
+          ) ||
+          apps.find((app) => exe && app.exe.toLowerCase() === exe.toLowerCase()) ||
+          apps.find((app) => app.name.toLowerCase() === channel.name.toLowerCase());
+        if (!match) {
+          stillMissing.push(channel.name);
+          continue;
+        }
+        try {
+          await this.attachProcessCapture(channel, {
+            pid: match.pid,
+            name: channel.name,
+            exe: match.exe,
+          });
+          recovered += 1;
+        } catch {
+          stillMissing.push(channel.name);
+        }
+        continue;
+      }
+
+      if (channel.kind === "app" && channel.captureMode === "device") {
+        const matched =
+          (channel.deviceId && this.inputDevices.find((d) => d.deviceId === channel.deviceId)?.deviceId) ||
+          this.inputDevices.find(
+            (d) =>
+              d.label === channel.deviceLabel ||
+              d.label.includes(channel.deviceLabel) ||
+              channel.deviceLabel.includes(d.label),
+          )?.deviceId;
+        if (!matched) {
+          stillMissing.push(channel.name);
+          continue;
+        }
+        try {
+          await this.setAppDevice(channel.id, matched);
+          recovered += 1;
+        } catch {
+          stillMissing.push(channel.name);
+        }
+        continue;
+      }
+
+      if (channel.kind === "mic") {
+        try {
+          await this.setMicDevice(channel.id, channel.deviceId || "");
+          recovered += 1;
+        } catch {
+          stillMissing.push(channel.name);
+        }
+      }
+    }
+
+    this.emit();
+    return { recovered, stillMissing };
   }
 
   /**
