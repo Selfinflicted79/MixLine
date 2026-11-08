@@ -87,7 +87,7 @@ export function Soundboard({
       const rect = cards[i]!.getBoundingClientRect();
       if (clientX < rect.left + rect.width / 2) return i;
     }
-    return Math.max(0, cards.length - 1);
+    return cards.length;
   }
 
   function dropLineLeft() {

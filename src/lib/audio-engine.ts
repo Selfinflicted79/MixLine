@@ -160,6 +160,7 @@ type ChannelNodes = {
   noiseCancel: boolean;
   noiseGate: number;
   noiseGateGain: GainNode | null;
+  noiseGatePump: ScriptProcessorNode | null;
   noiseSense: AnalyserNode | null;
   noiseSenseData: Float32Array | null;
   fileElement: HTMLAudioElement | null;
@@ -566,6 +567,9 @@ export class AudioEngine {
   async start() {
     if (!this.ctx) {
       this.ctx = new AudioContext({ sampleRate: 48000 });
+      document.addEventListener("visibilitychange", () => {
+        if (this.ctx && this.ctx.state !== "running") void this.ctx.resume();
+      });
       this.mixBus = this.ctx.createGain();
       this.mixBus.gain.value = 1;
       this.cueBus = this.ctx.createGain();
@@ -1693,27 +1697,7 @@ export class AudioEngine {
   private updateMeters() {
     this.pollWindowsOutputPeak();
     this.pollWindowsOutputVolume();
-    const t = this.ctx?.currentTime ?? 0;
     for (const ch of this.channels.values()) {
-      if (ch.noiseGateGain && ch.noiseSense && ch.noiseSenseData) {
-        if (ch.noiseGate <= 0.01 || !ch.connected) {
-          ch.noiseGateGain.gain.setTargetAtTime(1, t, 0.02);
-        } else {
-          ch.noiseSense.getFloatTimeDomainData(
-            ch.noiseSenseData as Float32Array<ArrayBuffer>,
-          );
-          let sum = 0;
-          for (let i = 0; i < ch.noiseSenseData.length; i++) {
-            const s = ch.noiseSenseData[i]!;
-            sum += s * s;
-          }
-          const rms = Math.sqrt(sum / ch.noiseSenseData.length);
-          // Higher gate = higher threshold (more of the room stays out).
-          const threshold = 0.004 + ch.noiseGate * 0.045;
-          const open = rms >= threshold ? 1 : 0;
-          ch.noiseGateGain.gain.setTargetAtTime(open, t, open ? 0.012 : 0.06);
-        }
-      }
       if (!ch.connected) {
         ch.peak *= this.peakHoldDecay;
         ch.rms *= 0.85;
@@ -1848,12 +1832,10 @@ export class AudioEngine {
       noiseGateGain = this.ctx.createGain();
       noiseGateGain.gain.value = 1;
       noiseSense = this.ctx.createAnalyser();
-      noiseSense.fftSize = 2048;
-      noiseSense.smoothingTimeConstant = 0.5;
+      noiseSense.fftSize = 1024;
+      noiseSense.smoothingTimeConstant = 0.35;
       noiseSenseData = new Float32Array(noiseSense.fftSize);
       boostGain.disconnect();
-      boostGain.connect(noiseSense);
-      boostGain.connect(noiseGateGain);
       noiseGateGain.connect(inputGain);
     }
 
@@ -1906,6 +1888,7 @@ export class AudioEngine {
       noiseCancel: kind === "mic",
       noiseGate: kind === "mic" ? 0.4 : 0,
       noiseGateGain,
+      noiseGatePump: null,
       noiseSense,
       noiseSenseData,
       fileElement: null,
@@ -1916,9 +1899,44 @@ export class AudioEngine {
       timeData: new Float32Array(analyser.fftSize),
     };
     this.channels.set(channel.id, channel);
+    if (kind === "mic") this.armMicGate(channel);
     this.wireChannelMix(channel);
     this.applyRouting();
     return channel;
+  }
+
+  /** Gate the mic on the audio clock so minimize doesn't dull the voice. */
+  private armMicGate(channel: ChannelNodes) {
+    if (!this.ctx || !channel.noiseGateGain) return;
+    const gate = channel.noiseGateGain;
+    const pump = this.ctx.createScriptProcessor(256, 2, 2);
+    let env = 0;
+    pump.onaudioprocess = (event) => {
+      const input = event.inputBuffer;
+      const output = event.outputBuffer;
+      let level = 0;
+      const count = Math.min(input.numberOfChannels, output.numberOfChannels);
+      for (let c = 0; c < count; c++) {
+        const src = input.getChannelData(c);
+        output.getChannelData(c).set(src);
+        let sum = 0;
+        for (let i = 0; i < src.length; i++) {
+          const s = src[i] ?? 0;
+          sum += s * s;
+        }
+        const rms = Math.sqrt(sum / Math.max(1, src.length));
+        if (rms > level) level = rms;
+      }
+      env = env * 0.55 + level * 0.45;
+      const amount = channel.noiseGate;
+      const open =
+        amount <= 0.01 || !channel.connected || env >= 0.004 + amount * 0.045;
+      gate.gain.setTargetAtTime(open ? 1 : 0, this.ctx?.currentTime ?? 0, open ? 0.008 : 0.045);
+    };
+    channel.boostGain.connect(pump);
+    if (channel.noiseSense) channel.boostGain.connect(channel.noiseSense);
+    pump.connect(gate);
+    channel.noiseGatePump = pump;
   }
 
   private applyRouting() {
@@ -2083,7 +2101,9 @@ export class AudioEngine {
     if (from < 0) return;
     const [item] = bankEntries.splice(from, 1);
     if (!item) return;
-    const index = Math.min(bankEntries.length, Math.max(0, Math.round(toIndex)));
+    let index = Math.round(toIndex);
+    if (index > from) index -= 1;
+    index = Math.min(bankEntries.length, Math.max(0, index));
     bankEntries.splice(index, 0, item);
     let bi = 0;
     const next = new Map<string, CueNodes>();

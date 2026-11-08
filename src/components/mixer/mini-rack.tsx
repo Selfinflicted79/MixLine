@@ -109,14 +109,14 @@ export function MiniRack({
 
       {cues.length > 0 ? (
         <div className="relative grid shrink-0 grid-cols-4 gap-0.5">
-          {cues.map((cue) => (
+          {cues.map((cue, index) => (
             <button
               key={cue.id}
               type="button"
               disabled={!started || cue.muted}
               className="truncate rounded-sm border border-black/40 bg-[linear-gradient(180deg,#5a4030,#3a281c)] px-0.5 py-1 text-[0.5rem] font-bold text-[#f0e6d4] uppercase disabled:opacity-40"
               onClick={() => onPlayCue(cue.id)}
-              title={cue.name}
+              title={`${index + 1}. ${cue.name}`}
             >
               {cue.name.slice(0, 8)}
             </button>

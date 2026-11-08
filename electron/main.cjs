@@ -20,6 +20,11 @@ const DEV_URL = process.env.VITE_DEV_SERVER_URL || "http://127.0.0.1:4317";
 
 // Splash intro can play video audio without a click when Chromium allows it.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+// Minimizing the window hides the page. Chromium then suspends the live mic
+// (getUserMedia) while file and app audio keep playing. Leave the mic up.
+app.commandLine.appendSwitch("disable-background-media-suspend");
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
@@ -333,8 +338,10 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      backgroundThrottling: false,
     },
   });
+  mainWindow.webContents.setBackgroundThrottling(false);
 
   if (isDev) {
     void mainWindow.loadURL(DEV_URL);
