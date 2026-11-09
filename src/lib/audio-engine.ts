@@ -160,7 +160,6 @@ type ChannelNodes = {
   noiseCancel: boolean;
   noiseGate: number;
   noiseGateGain: GainNode | null;
-  noiseGatePump: ScriptProcessorNode | null;
   noiseSense: AnalyserNode | null;
   noiseSenseData: Float32Array | null;
   fileElement: HTMLAudioElement | null;
@@ -438,6 +437,8 @@ export class AudioEngine {
   private playerPeak = 0;
   private playerRms = 0;
   private raf = 0;
+  /** Mic gate keeps ticking even when the window is minimized (rAF can stall). */
+  private micGateTimer = 0;
   private listeners = new Set<(snap: MixerSnapshot) => void>();
   private peakHoldDecay = 0.96;
   private pcmUnsub: (() => void) | null = null;
@@ -1669,12 +1670,39 @@ export class AudioEngine {
 
   private startMeterLoop() {
     cancelAnimationFrame(this.raf);
+    if (this.micGateTimer) window.clearInterval(this.micGateTimer);
     const tick = () => {
       this.updateMeters();
       this.emit();
       this.raf = requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
+    // Soft gate on a timer — never put ScriptProcessor in the mic path (pops/crackles).
+    this.micGateTimer = window.setInterval(() => this.updateMicGates(), 20);
+  }
+
+  private updateMicGates() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    for (const ch of this.channels.values()) {
+      if (!ch.noiseGateGain || !ch.noiseSense || !ch.noiseSenseData) continue;
+      if (ch.noiseGate <= 0.01 || !ch.connected) {
+        ch.noiseGateGain.gain.setTargetAtTime(1, t, 0.03);
+        continue;
+      }
+      ch.noiseSense.getFloatTimeDomainData(ch.noiseSenseData as Float32Array<ArrayBuffer>);
+      let sum = 0;
+      for (let i = 0; i < ch.noiseSenseData.length; i++) {
+        const s = ch.noiseSenseData[i]!;
+        sum += s * s;
+      }
+      const rms = Math.sqrt(sum / ch.noiseSenseData.length);
+      // Higher gate = higher threshold (more of the room stays out).
+      const threshold = 0.004 + ch.noiseGate * 0.045;
+      const open = rms >= threshold ? 1 : 0;
+      // Soft open/close so the gate never chops syllables into clicks.
+      ch.noiseGateGain.gain.setTargetAtTime(open, t, open ? 0.02 : 0.1);
+    }
   }
 
   private readMeter(
@@ -1832,10 +1860,12 @@ export class AudioEngine {
       noiseGateGain = this.ctx.createGain();
       noiseGateGain.gain.value = 1;
       noiseSense = this.ctx.createAnalyser();
-      noiseSense.fftSize = 1024;
-      noiseSense.smoothingTimeConstant = 0.35;
+      noiseSense.fftSize = 2048;
+      noiseSense.smoothingTimeConstant = 0.5;
       noiseSenseData = new Float32Array(noiseSense.fftSize);
       boostGain.disconnect();
+      boostGain.connect(noiseSense);
+      boostGain.connect(noiseGateGain);
       noiseGateGain.connect(inputGain);
     }
 
@@ -1888,7 +1918,6 @@ export class AudioEngine {
       noiseCancel: kind === "mic",
       noiseGate: kind === "mic" ? 0.4 : 0,
       noiseGateGain,
-      noiseGatePump: null,
       noiseSense,
       noiseSenseData,
       fileElement: null,
@@ -1899,44 +1928,9 @@ export class AudioEngine {
       timeData: new Float32Array(analyser.fftSize),
     };
     this.channels.set(channel.id, channel);
-    if (kind === "mic") this.armMicGate(channel);
     this.wireChannelMix(channel);
     this.applyRouting();
     return channel;
-  }
-
-  /** Gate the mic on the audio clock so minimize doesn't dull the voice. */
-  private armMicGate(channel: ChannelNodes) {
-    if (!this.ctx || !channel.noiseGateGain) return;
-    const gate = channel.noiseGateGain;
-    const pump = this.ctx.createScriptProcessor(256, 2, 2);
-    let env = 0;
-    pump.onaudioprocess = (event) => {
-      const input = event.inputBuffer;
-      const output = event.outputBuffer;
-      let level = 0;
-      const count = Math.min(input.numberOfChannels, output.numberOfChannels);
-      for (let c = 0; c < count; c++) {
-        const src = input.getChannelData(c);
-        output.getChannelData(c).set(src);
-        let sum = 0;
-        for (let i = 0; i < src.length; i++) {
-          const s = src[i] ?? 0;
-          sum += s * s;
-        }
-        const rms = Math.sqrt(sum / Math.max(1, src.length));
-        if (rms > level) level = rms;
-      }
-      env = env * 0.55 + level * 0.45;
-      const amount = channel.noiseGate;
-      const open =
-        amount <= 0.01 || !channel.connected || env >= 0.004 + amount * 0.045;
-      gate.gain.setTargetAtTime(open ? 1 : 0, this.ctx?.currentTime ?? 0, open ? 0.008 : 0.045);
-    };
-    channel.boostGain.connect(pump);
-    if (channel.noiseSense) channel.boostGain.connect(channel.noiseSense);
-    pump.connect(gate);
-    channel.noiseGatePump = pump;
   }
 
   private applyRouting() {

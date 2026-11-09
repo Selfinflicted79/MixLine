@@ -655,7 +655,7 @@ export function MixerBoard() {
               onClick={() =>
                 void (async () => {
                   try {
-                    const result = await checkMixLineUpdate("0.3.4");
+                    const result = await checkMixLineUpdate("0.3.5");
                     if (!result.available) {
                       setUpdateNote("You're on the latest MixLine.");
                       return;
